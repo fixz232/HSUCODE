@@ -1,8 +1,18 @@
 # HSUCODE
 
-**纯 Kotlin 原生 Android AI 智能体。** 一个运行在手机上的自主 AI Agent:多供应商接入、工具调用循环、子智能体并行协作、长期记忆、内置 root/Ubuntu 环境与终端,以及像素风「智能体指挥室」实时动画。从零构建,无跨端框架。
+**纯 Kotlin 原生 Android AI 智能体。** 一个运行在手机上的自主 AI Agent:多供应商接入、工具调用循环、子智能体并行协作、长期记忆、内置 root/Ubuntu 环境与终端,以及像素风「智能体指挥室」实时动画。原生 Android 工程,无跨端框架。
 
-> 版本:**1.0**(versionCode 100) · 许可:**GPL-3.0-or-later**
+> 版本:**1.10**(versionCode 110) · 许可:**GPL-3.0-or-later**
+
+---
+
+## 上游与修改声明
+
+本项目基于 [kusesad-1122/XINCODE-Public](https://github.com/kusesad-1122/XINCODE-Public) 修改而来。上游仓库地址为 <https://github.com/kusesad-1122/XINCODE-Public>。
+
+- 修改记录与时间:见 [`MODIFICATIONS.md`](MODIFICATIONS.md)。
+- 原始版权、许可证和作者声明均予以保留；不得删除 [`LICENSE`](LICENSE)、第三方许可证或源码中的既有归属声明。
+- 当前修改包含加密全量备份与跨设备恢复、恢复流程集成，以及智能体任务状态恢复的可靠性改进。
 
 ---
 

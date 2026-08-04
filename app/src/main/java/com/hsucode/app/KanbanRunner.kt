@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class KanbanRunner(
     private val database: AppDatabase,
     /** 造一个隔离的 AgentCore(全工具、独立 sessionId、不碰主对话)。 */
-    private val coreFactory: () -> AgentCore
+    private val coreFactory: (taskId: Long) -> AgentCore
 ) {
     companion object {
         private const val TAG = "HsucodeKanban"
@@ -138,7 +138,7 @@ class KanbanRunner(
         var error = ""
 
         try {
-            val core = coreFactory()
+            val core = coreFactory(task.id)
             // 指派给了子智能体就把它的设定拼进去。子智能体被删掉时按名字找不到,
             // 自动回落到主智能体 —— 删一个子智能体不该让所有指派给它的任务全废掉。
             val assigneePrompt = if (task.assignee.isNotBlank()) {
@@ -158,7 +158,10 @@ class KanbanRunner(
 
             // 超时:卡住的任务不能一直占着队列
             val finished = withTimeoutOrNull(TASK_TIMEOUT_MS) {
-                core.run(prompt, scope, thinkingEnabled = false, thinkingLevel = 1).join()
+                val resumed = if (core.hasPendingCursor()) {
+                    core.resumeFromCursorIfNeeded(scope, thinkingEnabled = false, thinkingLevel = 1)
+                } else null
+                (resumed ?: core.run(prompt, scope, thinkingEnabled = false, thinkingLevel = 1)).join()
                 // 跑完后从状态里判断成败
                 core.state.first { it is AgentState.Idle || it is AgentState.Error }
             }

@@ -1,3 +1,9 @@
+/*
+ * Modification notice (2026-08-04 17:26 UTC+08:00): HSUCODE is a modified work based on
+ * https://github.com/kusesad-1122/XINCODE-Public.
+ * Change: adds the backup and restore settings entry.
+ * Existing copyright, license, and author notices are retained.
+ */
 package com.hsucode.app
 
 import androidx.compose.animation.AnimatedVisibility
@@ -72,6 +78,9 @@ fun SettingsScreen(
     onNavigateToProfiles: () -> Unit = {},
     onNavigateToSubAgents: () -> Unit = {},
     onNavigateToEnvConfig: () -> Unit = {},
+    onNavigateToBackup: () -> Unit = {},
+    onNavigateToTaskRecovery: () -> Unit = {},
+    onNavigateToHealth: () -> Unit = {},
     onNavigateToAbout: () -> Unit = {}
 ) {
     val colors = LocalHsuColors.current
@@ -102,6 +111,8 @@ fun SettingsScreen(
 
         SettingsEntry("security", "Root 状态", rootDetector?.status?.label ?: "检测中", Icons.Outlined.AdminPanelSettings,
             { rootDetector?.recheck() }),
+        SettingsEntry("security", "配置健康中心", "集中检查关键配置与后台能力", Icons.Outlined.HealthAndSafety,
+            onNavigateToHealth),
         SettingsEntry("security", "Root 诊断", "检查命令和关键目录访问", Icons.Outlined.BugReport,
             { onRootDiagnostic?.invoke() }),
         SettingsEntry("security", "审计日志", "工具调用、决策和执行结果", Icons.Outlined.History, onNavigateToAuditLog),
@@ -109,6 +120,8 @@ fun SettingsScreen(
         SettingsEntry("data", "全局工作区", workspaceRoot.ifBlank { "/storage/emulated/0/HSUCODE" }, Icons.Outlined.FolderOpen,
             { showWorkspaceDialog = true }),
         SettingsEntry("data", "记忆与存储", "本地记忆数据", Icons.Outlined.Storage, onNavigateToMemoryStorage),
+        SettingsEntry("data", "备份与恢复", "全量加密备份与跨设备恢复", Icons.Outlined.Backup, onNavigateToBackup),
+        SettingsEntry("data", "任务恢复", "查看正在续跑或可恢复的长任务", Icons.Outlined.Restore, onNavigateToTaskRecovery),
         SettingsEntry("data", "上下文压缩", "长度、阈值和总结规则", Icons.Outlined.Compress, onNavigateToContextCompress),
         SettingsEntry("data", "精编记忆", "个人背景与近期状态", Icons.Outlined.Bookmarks, onNavigateToCuratedMemory),
         SettingsEntry("data", "定时任务", "后台自动任务", Icons.Outlined.Schedule, onNavigateToCron),

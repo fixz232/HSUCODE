@@ -1,6 +1,9 @@
 import java.util.Properties
 import java.io.FileInputStream
 
+// Modification notice (2026-08-04 17:26 UTC+08:00): HSUCODE is a modified
+// work based on https://github.com/kusesad-1122/XINCODE-Public. This file adds
+// backup/restore persistence support; existing copyright and license notices are retained.
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -20,8 +23,8 @@ android {
         applicationId = "com.hsucode.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = 109          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
-        versionName = "1.09"
+        versionCode = 110          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
+        versionName = "1.10"
     }
 
     // 只有在 keystore.properties 真实存在时才建 release 签名配置。
@@ -102,6 +105,7 @@ dependencies {
     implementation("org.mozilla:rhino:1.7.14")
     // 定时任务(CronScheduler/CronWorker 依赖 androidx.work.*)。同样别删。
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.room:room-ktx:2.6.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 

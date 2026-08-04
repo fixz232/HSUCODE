@@ -1,3 +1,9 @@
+/*
+ * Modification notice (2026-08-04 17:26 UTC+08:00): HSUCODE is a modified work based on
+ * https://github.com/kusesad-1122/XINCODE-Public.
+ * Change: applies pending backup restores before opening Room and restores portable secrets.
+ * Existing copyright, license, and author notices are retained.
+ */
 package com.hsucode.app
 
 import android.app.Application
@@ -92,6 +98,8 @@ class HsucodeApplication : Application() {
     val agentChatState: AgentChatState get() = active.chat
     /** sessionId -> 是否忙碌(由各 core 的状态收集器在主线程维护)。用于前台服务保活判断。 */
     private val coreBusy = HashMap<Long, Boolean>()
+    /** Prevent an idle collector emission from evicting a session while its cursor is being restored. */
+    private val recoveringSessions = HashSet<Long>()
     private lateinit var shellExecTool: ShellExecTool
     private lateinit var backgroundReviewRunner: BackgroundReviewRunner
     lateinit var securityGate: SecurityGateImpl
@@ -220,20 +228,34 @@ override fun onCreate() {
         // 晚一步注入,这一轮里 AI 就能把 App 自己的 databases/ 改坏(真实事故,见 SelfProtect)。
         com.hsucode.tools.SelfProtect.appDataDir = applicationInfo.dataDir.orEmpty()
 
+        // 恢复必须发生在 Room 首次打开前;运行中替换 WAL 数据库会造成不可恢复的混合状态。
+        BackupManager.applyPendingRestore(this)
+
         // ⚠️ database 必须在【任何用到它的代码之前】赋值。
         // 它是 lateinit,提前一行访问就是 UninitializedPropertyAccessException,
         // 抛在 Application.onCreate 里 = 进程当场死 = 用户看到的「点开就闪退」,
         // 而且全新安装一样崩,没有任何幸存路径。下面新增初始化时务必守住这个顺序。
         database = AppDatabase.getInstance(this)
+        keystore = KeystoreProvider()
+        runBlocking {
+            runCatching { BackupManager.applyRestoredSecrets(this@HsucodeApplication, database, keystore) }
+                .onFailure { Log.e("HsucodeApp", "portable credential restore failed", it) }
+        }
         // Initialize shared HTTP disk cache
         HttpCacheProvider.init(cacheDir)
 
         pruneOldAttachments()
         UsageRecorder.prune(database)
-        kanbanRunner = KanbanRunner(database) { buildIsolatedAgentCore() }
+        kanbanRunner = KanbanRunner(database) { taskId ->
+            buildIsolatedAgentCore(cursorSessionId = -1_000_000L - taskId)
+        }
         // 进程被杀时正在跑的任务会永远停在 running,重启后没人管它 —— 启动时统一收回 ready
         applicationScope.launch(Dispatchers.IO) {
-            runCatching { database.kanbanTaskDao().reclaimStuckRunning() }
+            runCatching {
+                val interrupted = database.kanbanTaskDao().runningCount()
+                database.kanbanTaskDao().reclaimStuckRunning()
+                if (interrupted > 0) kanbanRunner.start()
+            }
         }
         applicationScope.launch(Dispatchers.IO) {
             runCatching {
@@ -242,7 +264,6 @@ override fun onCreate() {
                 }
             }
         }
-        keystore = KeystoreProvider()
         openAiClient = OpenAiClient(database, keystore)
         // 按功能绑定的 client:各自去读【功能模型配置】,没配就自动回落到活跃配置。
         // 分别 new 而不是复用单例,是因为 functionKey 是构造参数(避免并发串配置)。
@@ -430,15 +451,6 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
             }
             // ChatScreen 不再自行加载历史(改由 app 负责),故这里填充 UI 列表。
             initial.chat.loadHistoryForSession(currentSessionId)
-            // gap-16:激活断点续传死代码——若上次工具已执行但结果未回灌即被杀,
-            // 以状态游标中的 pendingToolResult 续跑循环,不重复执行该工具。
-            try {
-                if (initial.core.hasPendingCursor()) {
-                    initial.core.resumeFromCursorIfNeeded(applicationScope)
-                }
-            } catch (e: Exception) {
-                Log.e("HsucodeApp", "resume from cursor failed: ${e.message}")
-            }
             Unit
         }
 
@@ -471,6 +483,9 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
                 Log.w("HsucodeApp", "defaults seed failed: ${e.message}")
             }
         }
+
+        // 全部依赖完成布线后恢复所有会话,不再只照顾启动时恰好位于前台的那一个。
+        applicationScope.launch(Dispatchers.Main) { resumeAllInterruptedSessions() }
 
         // gap-26:启动时自动发现工作区 skills/**/SKILL.md,导入 Room(进入系统提示技能清单)。
         applicationScope.launch(Dispatchers.IO) {
@@ -588,12 +603,12 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
      * Hermes-⑦:给后台(cron worker 等)造一个隔离 AgentCore——全工具、独立 sessionId、无游标、
      * 不触碰主对话。isReviewFork=true 避免它自己再触发后台复盘。
      */
-    fun buildIsolatedAgentCore(): AgentCore = AgentCore(
+    fun buildIsolatedAgentCore(cursorSessionId: Long? = null): AgentCore = AgentCore(
         openAiClient = cronClient,
         toolRegistry = toolRegistry,
         securityGate = securityGate,
-        cursorDao = null,
-        sessionId = -3L,
+        cursorDao = cursorSessionId?.let { database.stateCursorDao() },
+        sessionId = cursorSessionId ?: -3L,
         systemPrompt = buildLayeredSystemPrompt(null)
     ).also { it.isReviewFork = true }
 
@@ -672,9 +687,108 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         refreshForegroundService()
         // 后台会话(非当前)跑完即从池中回收:再回到它时会从 Room 重新加载最新历史。
         // 例外:运行中的 Goal 任务【钉住】不回收(轮次之间会短暂空闲,控制器还要驱动它继续)。
-        if (!state.isBusy && sid != currentSessionId && !activeGoalSessions.contains(sid)) {
+        if (state.isBusy) recoveringSessions.remove(sid)
+        if (!state.isBusy && sid != currentSessionId &&
+            !activeGoalSessions.contains(sid) && !recoveringSessions.contains(sid)
+        ) {
             sessionPool.remove(sid)?.collector?.cancel()
             coreBusy.remove(sid)
+        }
+    }
+
+    private suspend fun resumeAllInterruptedSessions() {
+        val goalRecoveries = withContext(Dispatchers.IO) {
+            GoalLoopController.loadRecoveries(database)
+        }
+        activeGoalSessions.addAll(goalRecoveries.map { it.sessionId })
+        val cursors = withContext(Dispatchers.IO) { database.stateCursorDao().getAll() }
+            .filter { it.sessionId > 0L }
+        for (cursor in cursors) {
+            val exists = withContext(Dispatchers.IO) {
+                database.sessionDao().getById(cursor.sessionId) != null
+            }
+            if (!exists) {
+                withContext(Dispatchers.IO) {
+                    database.stateCursorDao().deleteBySessionId(cursor.sessionId)
+                }
+                continue
+            }
+            recoveringSessions.add(cursor.sessionId)
+            val agents = sessionPool[cursor.sessionId] ?: buildSessionAgents(cursor.sessionId).also {
+                sessionPool[cursor.sessionId] = it
+            }
+            applyWorkspaceForSession(cursor.sessionId)
+            val resumed = runCatching { agents.chat.resumeInterruptedTask() }
+                .onFailure { Log.e("HsucodeApp", "resume session ${cursor.sessionId} failed", it) }
+                .getOrDefault(false)
+            if (!resumed) {
+                recoveringSessions.remove(cursor.sessionId)
+                if (cursor.sessionId != currentSessionId && !activeGoalSessions.contains(cursor.sessionId)) {
+                    sessionPool.remove(cursor.sessionId)?.collector?.cancel()
+                }
+            }
+        }
+
+        // Resume the outer Goal judge loop after inner AgentCore cursors have been scheduled.
+        kotlinx.coroutines.delay(700)
+        for (recovery in goalRecoveries) {
+            val session = withContext(Dispatchers.IO) { database.sessionDao().getById(recovery.sessionId) }
+            if (session == null) {
+                withContext(Dispatchers.IO) {
+                    database.settingDao().deleteByPrefix("goal_recovery_${recovery.sessionId}")
+                }
+                activeGoalSessions.remove(recovery.sessionId)
+                continue
+            }
+            val agents = sessionPool[recovery.sessionId] ?: buildSessionAgents(recovery.sessionId).also {
+                sessionPool[recovery.sessionId] = it
+            }
+            applyWorkspaceForSession(recovery.sessionId)
+            // Cursor recovery owns the in-memory list while it is streaming. Reloading here would
+            // remove its assistant placeholder and disconnect subsequent token updates from the UI.
+            if (!agents.chat.isStreaming.value) {
+                agents.chat.loadHistoryForSession(recovery.sessionId)
+            }
+            val controller = createGoalController(recovery.sessionId, agents.chat)
+            goalControllers[recovery.sessionId] = controller
+            goalRunStatus[recovery.sessionId] = "恢复第 ${recovery.round} 轮…"
+            controller.resume(recovery)
+        }
+    }
+
+    fun resumeRecoveryTask(cursorId: Long) {
+        if (cursorId <= -1_000_000L) {
+            val taskId = -1_000_000L - cursorId
+            kanbanRunner.runTask(taskId)
+            return
+        }
+        if (cursorId <= 0L) return
+        applicationScope.launch(Dispatchers.Main) {
+            recoveringSessions.add(cursorId)
+            val agents = sessionPool[cursorId] ?: buildSessionAgents(cursorId).also {
+                sessionPool[cursorId] = it
+            }
+            applyWorkspaceForSession(cursorId)
+            if (!agents.chat.resumeInterruptedTask()) recoveringSessions.remove(cursorId)
+        }
+    }
+
+    fun discardRecoveryTask(cursorId: Long) {
+        if (cursorId <= -1_000_000L) {
+            val taskId = -1_000_000L - cursorId
+            if (kanbanRunner.currentTaskId == taskId) kanbanRunner.stop()
+            applicationScope.launch(Dispatchers.IO) {
+                kotlinx.coroutines.delay(150)
+                database.stateCursorDao().deleteBySessionId(cursorId)
+                database.kanbanTaskDao().setStatus(
+                    taskId, com.hsucode.data.KanbanTaskEntity.STATUS_BLOCKED
+                )
+            }
+            return
+        }
+        sessionPool[cursorId]?.core?.stop()
+        applicationScope.launch(Dispatchers.IO) {
+            database.stateCursorDao().deleteBySessionId(cursorId)
         }
     }
 
@@ -770,9 +884,15 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         }
         // 确保该会话的 (core+chat) 在池中(控制器驱动的正是这一份,UI 打开时也绑它)。
         val agents = sessionPool[sessionId] ?: buildSessionAgents(sessionId).also { sessionPool[sessionId] = it }
-        val controller = GoalLoopController(
+        val controller = createGoalController(sessionId, agents.chat)
+        goalControllers[sessionId] = controller
+        controller.start(g)
+        refreshForegroundService()
+    }
+
+    private fun createGoalController(sessionId: Long, chat: AgentChatState) = GoalLoopController(
             sessionId = sessionId,
-            chat = agents.chat,
+            chat = chat,
             database = database,
             judgeFactory = { buildGoalJudge() },
             appScope = applicationScope,
@@ -784,10 +904,6 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
                 refreshForegroundService()
             }
         )
-        goalControllers[sessionId] = controller
-        controller.start(g)
-        refreshForegroundService()
-    }
 
     /**
      * 让群聊成员在【它自己的工作会话】里跑一轮,返回它最后说的那段话。

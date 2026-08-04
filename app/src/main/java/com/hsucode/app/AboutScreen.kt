@@ -12,6 +12,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,7 +28,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
-private const val REPO_URL = "https://github.com/kusesad-1122/HSUCODE-Public"
+private const val OPEN_SOURCE_URL = "https://github.com/fixz232/HSUCODE.git"
+private const val REPO_WEB_URL = "https://github.com/fixz232/HSUCODE"
+private const val UPSTREAM_URL = "https://github.com/kusesad-1122/XINCODE-Public"
 
 /**
  * 「关于」独立页:应用图标 + 名称 + 版本,以及检查更新、项目地址、Star、更新日志、开源许可、开发者。
@@ -77,13 +83,14 @@ fun AboutScreen(app: HsucodeApplication, onBack: () -> Unit) {
         Modifier.fillMaxSize().background(xc.bg).verticalScroll(rememberScrollState())
     ) {
         // 顶栏
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("← 返回", fontSize = 12.sp, fontFamily = HsuFont, color = xc.sub,
-                modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onBack() })
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回", tint = xc.sub)
+            }
             Spacer(Modifier.weight(1f))
             Text("关于", fontSize = 14.sp, fontFamily = HsuFont, color = xc.ink)
             Spacer(Modifier.weight(1f))
-            Spacer(Modifier.width(40.dp))   // 与左侧返回等宽,保证标题居中
+            Spacer(Modifier.width(48.dp))
         }
 
         // 图标 + 名称 + 版本
@@ -117,20 +124,20 @@ fun AboutScreen(app: HsucodeApplication, onBack: () -> Unit) {
 
         // 卡片二:项目相关
         AboutCard(xc) {
-            AboutRow("项目地址", REPO_URL, xc) { open(REPO_URL) }
+            AboutRow("开源地址", OPEN_SOURCE_URL, xc) { open(OPEN_SOURCE_URL) }
             AboutDivider(xc)
-            AboutRow("在 GitHub 点个 Star", "支持一下开发", xc) { open(REPO_URL) }
+            AboutRow("感谢上游", UPSTREAM_URL, xc) { open(UPSTREAM_URL) }
             AboutDivider(xc)
-            AboutRow("更新日志", "查看历史版本更新内容", xc) { open("$REPO_URL/releases") }
+            AboutRow("更新日志", "查看历史版本更新内容", xc) { open("$REPO_WEB_URL/releases") }
             AboutDivider(xc)
-            AboutRow("开源许可声明", "GPL-3.0 与第三方素材许可", xc) { open("$REPO_URL/blob/main/THIRD-PARTY-NOTICES.md") }
+            AboutRow("开源许可声明", "GPL-3.0 与第三方素材许可", xc) { open("$REPO_WEB_URL/blob/main/THIRD-PARTY-NOTICES.md") }
         }
 
         // 卡片三:反馈与开发者
         AboutCard(xc) {
-            AboutRow("问题反馈", "提交 Issue", xc) { open("$REPO_URL/issues") }
+            AboutRow("问题反馈", "提交 Issue", xc) { open("$REPO_WEB_URL/issues") }
             AboutDivider(xc)
-            AboutRow("开发者", "kusesad-1122", xc) { open("https://github.com/kusesad-1122") }
+            AboutRow("开发者", "fixz232", xc) { open("https://github.com/fixz232") }
         }
 
         Spacer(Modifier.height(20.dp))
@@ -163,7 +170,7 @@ private fun AboutCard(xc: HsuColors, content: @Composable ColumnScope.() -> Unit
     Column(
         Modifier.fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp)
-            .background(xc.bgElevated, RoundedCornerShape(12.dp)),
+            .background(xc.bgElevated, RoundedCornerShape(8.dp)),
         content = content
     )
 }

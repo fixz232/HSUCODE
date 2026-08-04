@@ -1,3 +1,9 @@
+/*
+ * Modification notice (2026-08-04 17:26 UTC+08:00): HSUCODE is a modified work based on
+ * https://github.com/kusesad-1122/XINCODE-Public.
+ * Change: integrates the backup and restore screen into application navigation.
+ * Existing copyright, license, and author notices are retained.
+ */
 package com.hsucode.app
 
 import android.os.Bundle
@@ -335,6 +341,9 @@ class MainActivity : ComponentActivity() {
                         onNavigateToProfiles = { currentPage = "profiles" },
                         onNavigateToSubAgents = { currentPage = "sub_agents" },
                         onNavigateToEnvConfig = { currentPage = "env_config" },
+                        onNavigateToBackup = { currentPage = "backup_restore" },
+                        onNavigateToTaskRecovery = { currentPage = "task_recovery" },
+                        onNavigateToHealth = { currentPage = "configuration_health" },
                         onNavigateToAbout = { currentPage = "about" },
                         darkMode = app.darkMode,
                         onUpdateDarkMode = { app.updateDarkMode(it) },
@@ -472,6 +481,18 @@ class MainActivity : ComponentActivity() {
                         onBack = { currentPage = "settings" }
                     )
                     "about" -> AboutScreen(app = app, onBack = { currentPage = "settings" })
+                    "backup_restore" -> BackupRestoreScreen(app = app, onBack = { currentPage = "settings" })
+                    "task_recovery" -> TaskRecoveryScreen(app = app, onBack = { currentPage = "settings" })
+                    "configuration_health" -> ConfigurationHealthScreen(
+                        app = app,
+                        onBack = { currentPage = "settings" },
+                        onProvider = { currentPage = "supplier" },
+                        onWorkspace = { currentPage = "settings" },
+                        onEnvironment = { currentPage = "env_config" },
+                        onMcp = { currentPage = "mcp" },
+                        onUpdate = { currentPage = "about" },
+                        onRecovery = { currentPage = "task_recovery" }
+                    )
                     "env_config" -> EnvConfigScreen(
                         onBack = { currentPage = "settings" },
                         onOpenTerminal = { terminalOrigin = "env_config"; currentPage = "terminal" }

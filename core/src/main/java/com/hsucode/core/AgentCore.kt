@@ -1,3 +1,9 @@
+/*
+ * Modification notice (2026-08-04 17:26 UTC+08:00): HSUCODE is a modified work based on
+ * https://github.com/kusesad-1122/XINCODE-Public.
+ * Change: improves durable task-cursor checkpointing and safe task resumption.
+ * Existing copyright, license, and author notices are retained.
+ */
 package com.hsucode.core
 
 import android.util.Log
@@ -76,6 +82,20 @@ class AgentCore(
         private const val CHARS_PER_TOKEN = 4
         private const val COMPACT_PREFIX_TOKENS = 1500
         private const val COMPACT_SUFFIX_TOKENS = 1000
+
+        internal fun cursorIteration(state: AgentState): Int = when (state) {
+            is AgentState.Thinking -> state.iteration
+            is AgentState.CallingTool -> state.iteration
+            is AgentState.WaitingConfirm -> state.iteration
+            is AgentState.Executing -> state.iteration
+            is AgentState.Responding -> state.iteration
+            is AgentState.Error -> state.iteration
+            AgentState.Idle, AgentState.Interrupted -> 0
+        }
+
+        internal fun resumeBaseIteration(state: String, storedIteration: Int): Int =
+            if (state == "Thinking") (storedIteration - 1).coerceAtLeast(0)
+            else storedIteration.coerceAtLeast(0)
     }
 
     // ---- dynamic limits (updated by power mode changes) ----
@@ -195,11 +215,20 @@ class AgentCore(
 
     /**
      * Restore state from a persisted cursor and continue the loop.
-     * @return true if restoration succeeded and loop was resumed, false if no cursor found.
+     * @return resumed job, or null if no recoverable cursor exists.
      */
-    suspend fun resumeFromCursorIfNeeded(scope: CoroutineScope): Boolean {
-        val cursor = cursorDao?.getBySessionId(sessionId) ?: return false
-        if (cursor.state == "Idle") return false
+    suspend fun resumeFromCursorIfNeeded(
+        scope: CoroutineScope,
+        thinkingEnabled: Boolean = false,
+        thinkingLevel: Int = 2
+    ): Job? {
+        if (_state.value.isBusy) return null
+        val dao = cursorDao ?: return null
+        val cursor = dao.getBySessionId(sessionId) ?: return null
+        if (cursor.state in setOf("Responding", "Error", "Interrupted")) {
+            dao.deleteBySessionId(sessionId)
+            return null
+        }
 
         Log.i(TAG, "Resuming from cursor: iteration=${cursor.iteration}, state=${cursor.state}")
 
@@ -217,26 +246,31 @@ class AgentCore(
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse cursor messages: ${e.message}")
-            cursorDao?.deleteBySessionId(sessionId)
-            return false
+            dao.deleteBySessionId(sessionId)
+            return null
         }
 
         // Restore state
         when (cursor.state) {
-            "CallingTool", "Executing" -> {
-                // Tool was executed, result pending — feed back to model
+            "CallingTool", "WaitingConfirm", "Executing" -> {
                 pendingToolCallJson = cursor.pendingToolCallJson
                 pendingToolResultJson = cursor.pendingToolResultJson
-
+                val callJson = cursor.pendingToolCallJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+                val callId = callJson?.optString("tool_call_id").orEmpty()
                 val resultJson = cursor.pendingToolResultJson
                 if (resultJson != null) {
                     val toolResult = org.json.JSONObject(resultJson)
-                    val callId = toolResult.optString("tool_call_id", "")
                     val content = toolResult.optString("content", "")
                     messages.add(org.json.JSONObject().apply {
-                        put("role", "tool")
-                        put("tool_call_id", callId)
+                        put("role", "tool"); put("tool_call_id", toolResult.optString("tool_call_id", callId))
                         put("content", content)
+                    })
+                } else if (callId.isNotBlank()) {
+                    // The process died between intent persistence and durable result persistence.
+                    // Re-running a write/shell tool could duplicate an already completed side effect.
+                    messages.add(JSONObject().apply {
+                        put("role", "tool"); put("tool_call_id", callId)
+                        put("content", "任务在工具结果落盘前中断,执行结果未知。为避免重复副作用,HSUCODE 未自动重试该调用。请先检查当前状态,再决定下一步。")
                     })
                 }
                 Log.i(TAG, "Resumed with pending tool result, continuing loop at iteration ${cursor.iteration}")
@@ -246,9 +280,19 @@ class AgentCore(
             }
         }
 
-        // Clear the cursor (will be re-created by loop checkpoints)
-        cursorDao?.deleteBySessionId(sessionId)
-        return true
+        pendingToolCallJson = null
+        pendingToolResultJson = null
+        val baseIteration = resumeBaseIteration(cursor.state, cursor.iteration)
+        if (currentTurnId == 0L) currentTurnId = System.currentTimeMillis()
+        return launchLoop(scope) {
+            runLoop(
+                initialUserMessage = "",
+                thinkingEnabled = thinkingEnabled,
+                thinkingLevel = thinkingLevel,
+                initialIteration = baseIteration,
+                appendInitialUser = false
+            )
+        }
     }
 
     /** Save current state to cursor for potential resume. */
@@ -268,7 +312,7 @@ class AgentCore(
             }
             dao.upsert(StateCursorEntity(
                 sessionId = sessionId,
-                iteration = (_state.value as? AgentState.Thinking)?.iteration ?: 0,
+                iteration = cursorIteration(_state.value),
                 state = stateStr,
                 messagesJson = msgsJson,
                 pendingToolCallJson = pendingToolCallJson,
@@ -455,15 +499,19 @@ class AgentCore(
             return Job()
         }
 
+        return launchLoop(scope) { runLoop(userMessage, thinkingEnabled, thinkingLevel) }
+    }
+
+    private fun launchLoop(scope: CoroutineScope, block: suspend () -> Unit): Job {
         currentJob = scope.launch {
             try {
-                withTimeout(totalTimeoutMs) {
-                    runLoop(userMessage, thinkingEnabled, thinkingLevel)
-                }
+                withTimeout(totalTimeoutMs) { block() }
             } catch (e: TimeoutCancellationException) {
                 _state.value = AgentState.Error("总超时 (${totalTimeoutMs / 60_000} 分钟)")
+                withContext(NonCancellable) { clearCursor() }
             } catch (e: CancellationException) {
                 _state.value = AgentState.Interrupted
+                withContext(NonCancellable) { clearCursor() }
             } catch (e: Exception) {
                 Log.e(TAG, "Loop exception: ${e.message}", e)
                 _state.value = AgentState.Error(e.message ?: "未知错误")
@@ -480,20 +528,28 @@ class AgentCore(
 
     // ---- loop ----
 
-    private suspend fun runLoop(initialUserMessage: String, thinkingEnabled: Boolean, thinkingLevel: Int) {
+    private suspend fun runLoop(
+        initialUserMessage: String,
+        thinkingEnabled: Boolean,
+        thinkingLevel: Int,
+        initialIteration: Int = 0,
+        appendInitialUser: Boolean = true
+    ) {
         // L3:每次 run 开始清零累计,使其代表"本轮/本任务"合计。
         cumulativePromptTokens = 0L
         cumulativeCompletionTokens = 0L
         // gap-24 生命周期 hooks:会话开始 + 用户输入提交
-        fireHook("session_start")
-        fireHook("user_prompt_submit", mapOf("prompt" to initialUserMessage))
+        fireHook(if (appendInitialUser) "session_start" else "session_resume")
+        if (appendInitialUser) fireHook("user_prompt_submit", mapOf("prompt" to initialUserMessage))
 
-        // Add user message to history
-        messages.add(org.json.JSONObject().apply {
-            put("role", "user")
-            put("content", initialUserMessage)
-        })
-        checkpointCursor()  // user message persisted
+        if (appendInitialUser) {
+            messages.add(org.json.JSONObject().apply {
+                put("role", "user")
+                put("content", initialUserMessage)
+            })
+            _state.value = AgentState.Thinking(1)
+            checkpointCursor()
+        }
 
         // 一个 runLoop = 一个用户问题 = 一个 turn
         // turnId 由 send() 预置在 currentTurnId 中,此处不再覆盖
@@ -503,7 +559,7 @@ class AgentCore(
         }
         // 不再有 onTurnStart 回调:AgentChatState 直接读 currentTurnId
 
-        var iteration = 0
+        var iteration = initialIteration
         consecutiveTruncations = 0
         lastToolErrorSignature = null; repeatedToolErrors = 0
         while (iteration < maxIterations) {
@@ -525,6 +581,7 @@ class AgentCore(
             }
 
             _state.value = AgentState.Thinking(iteration)
+            checkpointCursor()
             Log.d(TAG, "loop start, iter=$iteration")
 
             // gap-10:自动压缩——上一轮 prompt_tokens 超过 context_window*阈值% 时,触发一次上下文压缩。
@@ -618,6 +675,11 @@ class AgentCore(
                     else rawCall.copy(name = toolRegistry.canonicalName(rawCall.name))
                 callIndex++
                 _state.value = AgentState.CallingTool(iteration, call.name, call.arguments)
+                pendingToolCallJson = JSONObject().apply {
+                    put("tool_call_id", call.id); put("name", call.name); put("arguments", call.arguments)
+                }.toString()
+                pendingToolResultJson = null
+                checkpointCursor()
 
                 // Emit PushCall so UI shows a pending ToolCallBlock
                 onToolBlock?.invoke(ToolBlockAction.PushCall(callIndex, call.name, call.arguments))
@@ -642,6 +704,7 @@ class AgentCore(
                                 put("tool_call_id", call.id)
                                 put("content", "操作被安全闸门拒绝: ${decision.reason}")
                             })
+                            pendingToolCallJson = null
                             checkpointCursor()
                             continue
                         }
@@ -661,6 +724,7 @@ class AgentCore(
                                         put("tool_call_id", call.id)
                                         put("content", "操作需要确认但无可用的确认处理程序，已自动拒绝")
                                     })
+                                    pendingToolCallJson = null
                                     checkpointCursor()
                                     continue
                                 }
@@ -677,6 +741,7 @@ class AgentCore(
                                             put("role", "tool"); put("tool_call_id", call.id)
                                             put("content", "用户拒绝了此操作")
                                         })
+                                        pendingToolCallJson = null
                                         checkpointCursor(); continue
                                     }
                                     ToolConfirmResult.ALLOW_ONCE -> {
@@ -775,11 +840,6 @@ class AgentCore(
                 }
 
                 // Save cursor with pending tool result BEFORE feeding back
-                pendingToolCallJson = org.json.JSONObject().apply {
-                    put("tool_call_id", call.id)
-                    put("name", call.name)
-                    put("arguments", call.arguments)
-                }.toString()
                 pendingToolResultJson = org.json.JSONObject().apply {
                     put("tool_call_id", call.id)
                     put("content", content)

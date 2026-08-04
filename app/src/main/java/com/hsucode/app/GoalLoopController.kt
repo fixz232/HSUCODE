@@ -9,6 +9,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 /**
  * Goal/Work 模式的单任务循环控制器。
@@ -35,35 +36,75 @@ class GoalLoopController(
     /** 完成回调(sessionId, achieved, 摘要):用于发系统通知。 */
     private val onDone: (Long, Boolean, String) -> Unit
 ) {
-    companion object { private const val TAG = "GoalLoop" }
+    companion object {
+        private const val TAG = "GoalLoop"
+        private const val RECOVERY_PREFIX = "goal_recovery_"
+
+        data class Recovery(val sessionId: Long, val goal: String, val round: Int, val phase: String)
+
+        suspend fun loadRecoveries(database: AppDatabase): List<Recovery> =
+            database.settingDao().getByPrefix(RECOVERY_PREFIX).mapNotNull { entry ->
+                runCatching {
+                    val json = JSONObject(entry.value)
+                    Recovery(
+                        sessionId = entry.key.removePrefix(RECOVERY_PREFIX).toLong(),
+                        goal = json.getString("goal"),
+                        round = json.optInt("round", 0),
+                        phase = json.optString("phase", "executing")
+                    )
+                }.getOrNull()
+            }
+    }
 
     @Volatile private var job: Job? = null
     val isRunning: Boolean get() = job?.isActive == true
 
     fun start(goal: String) {
         if (isRunning) return
-        job = appScope.launch { runLoop(goal) }
+        job = appScope.launch { runLoop(goal, initialRound = 0, resumePhase = null) }
+    }
+
+    fun resume(recovery: Recovery) {
+        if (isRunning) return
+        job = appScope.launch {
+            // AgentChatState cursor restoration is scheduled first during Application startup.
+            // Give it one main-loop turn to become streaming before waiting for the recovered round.
+            kotlinx.coroutines.delay(500)
+            runLoop(recovery.goal, recovery.round, recovery.phase)
+        }
     }
 
     fun stop() {
         job?.cancel(); job = null
-        appScope.launch { setStatus("failed", "已手动停止") }
+        appScope.launch {
+            clearRecovery()
+            setStatus("failed", "已手动停止")
+        }
     }
 
-    private suspend fun runLoop(goal: String) {
+    private suspend fun runLoop(goal: String, initialRound: Int, resumePhase: String?) {
         val judge = judgeFactory()
-        setStatus("running", "第 1 轮:执行中…")
+        setStatus("running", if (initialRound > 0) "恢复第 $initialRound 轮…" else "第 1 轮:执行中…")
         try {
-            var round = 0
-            while (round < maxRounds) {
-                round++
-                onStatus(sessionId, "第 $round 轮:执行中…")
+            var round = initialRound
+            var continueWithJudge = initialRound > 0 && resumePhase in setOf("executing", "judging")
+            if (continueWithJudge && chat.isStreaming.value) {
+                waitUntil(perRoundTimeoutMs) { !chat.isStreaming.value }
+            }
+            while (round < maxRounds || continueWithJudge) {
+                if (!continueWithJudge) {
+                    round++
+                    onStatus(sessionId, "第 $round 轮:执行中…")
+                    persistRecovery(goal, round, "executing")
 
-                // 组织本轮消息:首轮=目标;之后=目标+裁判反馈。
-                val prompt = if (round == 1) firstPrompt(goal) else nextPrompt(goal, round)
-                runOneTurn(prompt)
+                    // 组织本轮消息:首轮=目标;之后=目标+裁判反馈。
+                    val prompt = if (round == 1) firstPrompt(goal) else nextPrompt(goal, round)
+                    runOneTurn(prompt)
+                }
+                continueWithJudge = false
 
                 onStatus(sessionId, "第 $round 轮:裁判评估中…")
+                persistRecovery(goal, round, "judging")
                 val output = lastAssistantOutput()
                 val verdict = judge.judgePanel(goal, output, round, voters = 3)
 
@@ -74,17 +115,20 @@ class GoalLoopController(
                 }
                 lastJudgeExplanation = verdict.explanation
                 if (verdict.achieved) {
+                    clearRecovery()
                     setStatus("achieved", "✓ 已达成(第 $round 轮)")
                     onDone(sessionId, true, verdict.explanation.take(140))
                     return
                 }
             }
+            clearRecovery()
             setStatus("failed", "✗ 达最大轮数($maxRounds)未达成")
             onDone(sessionId, false, lastJudgeExplanation.ifBlank { "达最大轮数未达成" }.take(140))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "goal loop error: ${e.message}", e)
+            clearRecovery()
             setStatus("failed", "✗ 出错:${e.message?.take(60)}")
             onDone(sessionId, false, "出错:${e.message?.take(120)}")
         } finally {
@@ -93,6 +137,23 @@ class GoalLoopController(
     }
 
     private var lastJudgeExplanation: String = ""
+
+    private suspend fun persistRecovery(goal: String, round: Int, phase: String) {
+        withContext(Dispatchers.IO) {
+            val json = JSONObject()
+                .put("goal", goal)
+                .put("round", round)
+                .put("phase", phase)
+                .put("updatedAt", System.currentTimeMillis())
+            database.settingDao().put("$RECOVERY_PREFIX$sessionId", json.toString())
+        }
+    }
+
+    private suspend fun clearRecovery() {
+        withContext(Dispatchers.IO) {
+            database.settingDao().deleteByPrefix("$RECOVERY_PREFIX$sessionId")
+        }
+    }
 
     /** 发一条消息并等这一轮完全跑完(含所有工具迭代)。 */
     private suspend fun runOneTurn(prompt: String) {

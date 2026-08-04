@@ -1,3 +1,9 @@
+/*
+ * Modification notice (2026-08-04 17:26 UTC+08:00): HSUCODE is a modified work based on
+ * https://github.com/kusesad-1122/XINCODE-Public.
+ * Change: restores persisted agent-task output and state in the chat interface.
+ * Existing copyright, license, and author notices are retained.
+ */
 package com.hsucode.app
 
 import android.util.Log
@@ -422,6 +428,92 @@ class AgentChatState(
             messages.add(ChatState.MessageUi(msg.id, msg.role, msg.content, msg.timestamp, reasoning = msg.reasoning ?: "", turnId = msg.turnId, contentBlock = block))
         }
         Log.d(TAG, "Loaded ${messages.size} messages for session $sessionId")
+    }
+
+    /** Restore a persisted AgentCore cursor and keep resumed output visible and durable. */
+    suspend fun resumeInterruptedTask(): Boolean = withContext(Dispatchers.Main) {
+        if (activeJob?.isActive == true || !agentCore.hasPendingCursor()) return@withContext false
+        loadHistoryForSession(currentSessionId)
+        activeJob = scope.launch {
+            var tokenCollector: Job? = null
+            var reasoningCollector: Job? = null
+            try {
+                isStreaming.value = true
+                val turnId = System.currentTimeMillis()
+                agentCore.currentTurnId = turnId
+                val placeholder = MessageEntity(
+                    role = "assistant", content = "", sessionId = currentSessionId, turnId = turnId
+                )
+                val messageId = withContext(Dispatchers.IO) { messageDao.insert(placeholder) }
+                messages.add(ChatState.MessageUi(messageId, "assistant", "", placeholder.timestamp, turnId = turnId))
+                val index = messages.lastIndex
+                val content = StringBuilder()
+                val reasoning = StringBuilder()
+                var lastPersist = 0L
+
+                tokenCollector = launch {
+                    agentCore.tokenFlow.collect { token ->
+                        content.append(token)
+                        if (index in messages.indices) messages[index] = messages[index].copy(content = content.toString())
+                        val now = System.currentTimeMillis()
+                        if (now - lastPersist >= 500) {
+                            lastPersist = now
+                            launch(Dispatchers.IO) { messageDao.updateContent(messageId, content.toString()) }
+                        }
+                    }
+                }
+                reasoningCollector = launch {
+                    agentCore.reasoningFlow.collect { token ->
+                        reasoning.append(token)
+                        if (index in messages.indices) messages[index] = messages[index].copy(reasoning = reasoning.toString())
+                    }
+                }
+                agentCore.onToolBlock = { action ->
+                    when (action) {
+                        is ToolBlockAction.PushCall -> pushToolCallBlock(action.toolName, action.arguments, action.callIndex)
+                        is ToolBlockAction.UpdateResult -> updateToolCallBlock(
+                            action.callIndex, action.stdout, action.stderr, action.exitCode, action.durationMs,
+                            when (action.status) {
+                                "SUCCESS" -> ToolStatus.SUCCESS
+                                "FAIL" -> ToolStatus.FAILED
+                                else -> ToolStatus.DENIED
+                            }
+                        )
+                    }
+                }
+
+                val job = agentCore.resumeFromCursorIfNeeded(scope, thinkingEnabled, thinkingLevel)
+                if (job == null) {
+                    withContext(Dispatchers.IO) { messageDao.deleteById(messageId) }
+                    messages.removeAt(index)
+                    return@launch
+                }
+                job.join()
+                tokenCollector.cancelAndJoin()
+                reasoningCollector.cancelAndJoin()
+                val finalText = when (val state = agentCore.state.value) {
+                    is AgentState.Error -> content.toString().ifBlank { "✗ ${state.message}" }
+                    else -> content.toString()
+                }
+                if (index in messages.indices) {
+                    messages[index] = messages[index].copy(content = finalText, reasoning = reasoning.toString())
+                }
+                withContext(Dispatchers.IO) {
+                    messageDao.updateContent(messageId, finalText)
+                    if (reasoning.isNotEmpty()) messageDao.updateReasoning(messageId, reasoning.toString())
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "resume interrupted task failed", e)
+            } finally {
+                tokenCollector?.cancel()
+                reasoningCollector?.cancel()
+                isStreaming.value = false
+                activeJob = null
+            }
+        }
+        true
     }
 
     // ---- send ----

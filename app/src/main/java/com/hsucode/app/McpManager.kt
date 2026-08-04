@@ -262,6 +262,8 @@ class McpManager(
 
     private fun connectionKey(server: McpServerEntity): String =
         if (server.transport == "stdio") "stdio:${server.name}" else "http:${server.url}"
+
+    fun activeConnectionCount(): Int = clients.size
 }
 
 sealed class McpConnectResult {

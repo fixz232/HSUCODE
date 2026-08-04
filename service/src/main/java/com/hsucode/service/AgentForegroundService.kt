@@ -1,3 +1,9 @@
+/*
+ * Modification notice (2026-08-04 17:26 UTC+08:00): HSUCODE is a modified work based on
+ * https://github.com/kusesad-1122/XINCODE-Public.
+ * Change: requests service-intent redelivery so interrupted tasks can be restored safely.
+ * Existing copyright, license, and author notices are retained.
+ */
 package com.hsucode.service
 
 import android.app.Notification
@@ -89,7 +95,9 @@ class AgentForegroundService : Service() {
         Log.i(TAG, "startForeground: $status")
         val notification = buildNotification(this, status)
         startForeground(NOTIFICATION_ID, notification)
-        return START_NOT_STICKY
+        // Application startup restores the actual task from Room; redelivering the status intent
+        // ensures Android recreates the process and foreground notification after a service kill.
+        return START_REDELIVER_INTENT
     }
 
     override fun onDestroy() {
