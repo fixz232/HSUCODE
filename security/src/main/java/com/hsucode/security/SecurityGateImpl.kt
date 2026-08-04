@@ -89,7 +89,10 @@ class SecurityGateImpl(
 
     companion object {
         /** gap-13 只读内建工具:任何模式(DENY_ALL 除外)自动放行。 */
-        val READ_ONLY_TOOLS = setOf("file_read", "list_dir", "grep", "glob")
+        val READ_ONLY_TOOLS = setOf(
+            "file_read", "list_dir", "grep", "glob",
+            "web_search", "web_fetch", "invoke_skill"
+        )
         /** gap-15 写/执行类工具:只读/计划模式一律拒绝。 */
         val WRITE_TOOLS = setOf("file_write", "file_edit", "multi_edit", "su_exec")
         /** gap-13 只读安全命令白名单(词边界匹配,无写重定向时自动放行)。 */
@@ -114,6 +117,8 @@ class SecurityGateImpl(
             "file_write" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "文件写入可回滚")
             "file_edit", "multi_edit" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "文件局部编辑可回滚")
             "list_dir", "grep", "glob" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "只读文件/目录操作，可逆")
+            "web_search", "web_fetch" -> GateCommand(toolName, toolArgs, Capability.NET, Reversibility.REVERSIBLE, "只读网络检索，不修改本地数据")
+            "invoke_skill" -> GateCommand(toolName, toolArgs, Capability.UNKNOWN, Reversibility.REVERSIBLE, "只读取技能说明，不执行副作用")
             else -> GateCommand(toolName, toolArgs, Capability.UNKNOWN, Reversibility.IRREVERSIBLE, "未知工具类型，默认不可逆")
         }
     }

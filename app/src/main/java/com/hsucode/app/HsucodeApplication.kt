@@ -257,6 +257,11 @@ override fun onCreate() {
                 if (interrupted > 0) kanbanRunner.start()
             }
         }
+        // 进程退出时未收尾的指挥室运行不能永远显示为 running。
+        applicationScope.launch(Dispatchers.IO) {
+            runCatching { database.commandRoomHistoryDao().markRunningAsInterrupted() }
+                .onFailure { Log.w("HsucodeApp", "command room history recovery failed: ${it.message}") }
+        }
         applicationScope.launch(Dispatchers.IO) {
             runCatching {
                 database.providerConfigDao().getActive()?.let {

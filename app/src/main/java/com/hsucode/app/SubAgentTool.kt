@@ -2,15 +2,23 @@ package com.hsucode.app
 
 import android.util.Log
 import com.hsucode.core.AgentCore
+import com.hsucode.core.AgentState
 import com.hsucode.core.Tool
 import com.hsucode.core.ToolRegistry
 import com.hsucode.core.ToolResult
 import com.hsucode.data.AppDatabase
+import com.hsucode.data.CommandRoomEventEntity
+import com.hsucode.data.CommandRoomRunEntity
 import com.hsucode.data.SubAgentEntity
 import com.hsucode.provider.OpenAiClient
+import com.hsucode.security.Reversibility
 import com.hsucode.security.SecurityGate
 import com.hsucode.security.ToolConfirmResult
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -36,11 +44,24 @@ class SubAgentTool(
         private const val MAX_CONCURRENT = 4
         // 网络研究常常需要多轮抓取,3 分钟太短会"搜到超时";放宽到 10 分钟。
         private const val TASK_TIMEOUT_MS = 10 * 60 * 1000L
+        private const val APPROVAL_TIMEOUT_MS = 5 * 60 * 1000L
+        private const val ACTIVITY_THROTTLE_MS = 120L
         private val READONLY_DEFAULT = listOf("file_read", "list_dir", "grep", "glob")
         // 无论子智能体类型如何,都【始终】赋予联网工具——否则研究/探索类会退化成只翻本地文件、直到超时。
         private val ALWAYS_GRANTED = listOf("web_search", "web_fetch", "invoke_skill")
-        // 子智能体后台自主运行时自动放行的【安全】工具(只读/联网/技能)。其余需确认的一律拒绝。
-        private val SAFE_AUTO_ALLOW = (ALWAYS_GRANTED + READONLY_DEFAULT).toSet()
+    }
+
+    private val controlScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val workerSemaphore = Semaphore(MAX_CONCURRENT)
+    private val activeCores = ConcurrentHashMap<String, AgentCore>()
+    private val cancelledWorkers = ConcurrentHashMap.newKeySet<String>()
+
+    init {
+        scene?.bindActions(
+            onCancelWorker = ::cancelWorker,
+            onRetryWorker = ::retryWorker,
+            onStopAll = ::stopAll
+        )
     }
 
     override val name = "dispatch_agents"
@@ -114,77 +135,149 @@ class SubAgentTool(
         }.filter { it.first.isNotBlank() && it.second.isNotBlank() }
         if (items.isEmpty()) return ToolResult.Error("assignments 无有效项(需 agent + task)")
 
-        scene?.begin(items) // 「指挥室」动画:登记这场分配
+        val sceneWorkers = scene?.begin(items)
+        val runId = sceneWorkers?.firstOrNull()?.runId ?: UUID.randomUUID().toString()
+        val workerIds = items.indices.map { sceneWorkers?.get(it)?.workerRunId ?: "$runId:$it" }
+        recordRun(CommandRoomRunEntity(runId, System.currentTimeMillis(), assignmentCount = items.size))
+        items.forEachIndexed { index, (agentName, task) ->
+            recordEvent(runId, workerIds[index], agentName, "assigned", SubAgentSceneState.Status.QUEUED, task)
+        }
 
-        val sem = java.util.concurrent.Semaphore(MAX_CONCURRENT)
         val out = JSONArray()
-        coroutineScope {
-            val jobs = items.mapIndexed { idx, (agentName, task) ->
-                async(Dispatchers.IO) {
-                    sem.acquire()
-                    try { runOne(idx, agentName, task) }
-                    finally { sem.release() }
+        var outcome = "interrupted"
+        try {
+            supervisorScope {
+                val jobs = items.mapIndexed { index, (agentName, task) ->
+                    async(Dispatchers.IO) {
+                        workerSemaphore.withPermit {
+                            runOne(runId, workerIds[index], agentName, task)
+                        }
+                    }
+                }
+                jobs.forEach { out.put(it.await()) }
+            }
+            val itemOutcomes = (0 until out.length()).map { out.optJSONObject(it)?.optString("outcome").orEmpty() }
+            outcome = when {
+                itemOutcomes.all { it == "succeeded" } -> "completed"
+                itemOutcomes.any { it == "failed" || it == "timed_out" } -> "failed"
+                itemOutcomes.any { it == "cancelled" } -> "cancelled"
+                else -> "failed"
+            }
+            return ToolResult.Success(out.toString(2))
+        } catch (e: CancellationException) {
+            workerIds.forEach { workerId ->
+                cancelledWorkers.add(workerId)
+                activeCores[workerId]?.stop()
+                if (scene?.worker(workerId)?.status?.isActive == true) {
+                    scene.fail(workerId, SubAgentSceneState.Status.CANCELLED, "上层任务已停止")
                 }
             }
-            jobs.forEach { out.put(it.await()) }
+            outcome = "cancelled"
+            throw e
+        } finally {
+            scene?.finishRun()
+            finishHistoryRun(runId, outcome)
         }
-        scene?.finishAll()
-        return ToolResult.Success(out.toString(2))
     }
 
-    private suspend fun runOne(index: Int, agentName: String, task: String): JSONObject {
+    private suspend fun runOne(
+        runId: String,
+        workerRunId: String,
+        agentName: String,
+        task: String
+    ): JSONObject {
+        if (cancelledWorkers.remove(workerRunId)) {
+            scene?.fail(workerRunId, SubAgentSceneState.Status.CANCELLED, "已取消")
+            recordEvent(runId, workerRunId, agentName, "cancelled", SubAgentSceneState.Status.CANCELLED, "执行前取消")
+            return result(agentName, false, "已取消", "cancelled", workerRunId)
+        }
+        scene?.setStatus(workerRunId, SubAgentSceneState.Status.PREPARING, "加载智能体配置")
         val def = database.subAgentDao().getByName(agentName)
         if (def == null) {
-            scene?.setStatus(index, SubAgentSceneState.Status.FAILED)
-            return result(agentName, false, "未找到子智能体类型「$agentName」(用 list_sub_agents 查看)")
+            val error = "未找到子智能体类型「$agentName」(用 list_sub_agents 查看)"
+            scene?.fail(workerRunId, SubAgentSceneState.Status.FAILED, error)
+            recordEvent(runId, workerRunId, agentName, "failed", SubAgentSceneState.Status.FAILED, error)
+            return result(agentName, false, error, "failed", workerRunId)
         }
-        scene?.setStatus(index, SubAgentSceneState.Status.RUNNING)
-        val r = try {
-            withTimeoutOrNull(TASK_TIMEOUT_MS) {
-                val core = buildCore(def)
-                core.clearHistory()
+        scene?.setStatus(workerRunId, SubAgentSceneState.Status.RUNNING, "分析任务")
+        recordEvent(runId, workerRunId, agentName, "started", SubAgentSceneState.Status.RUNNING, task)
+        var core: AgentCore? = null
+        return try {
+            withTimeout(TASK_TIMEOUT_MS) {
+                val runtimeCore = buildCore(def, workerRunId, runId)
+                core = runtimeCore
+                activeCores[workerRunId] = runtimeCore
+                runtimeCore.clearHistory()
                 val buf = StringBuilder()
                 coroutineScope {
-                    // 边跑边把输出尾部推给「指挥室」,让用户点进子智能体能看到它当前在做什么。
+                    var lastUiUpdate = 0L
                     val collector = launch {
-                        core.tokenFlow.collect {
+                        runtimeCore.tokenFlow.collect {
                             buf.append(it)
-                            scene?.setActivity(index, buf.toString().takeLast(600))
+                            val now = System.currentTimeMillis()
+                            if (now - lastUiUpdate >= ACTIVITY_THROTTLE_MS) {
+                                scene?.setActivity(workerRunId, buf.toString().takeLast(600))
+                                lastUiUpdate = now
+                            }
                         }
                     }
-                    // 也把工具调用动作透出为实时动作。
-                    core.onToolBlock = { action ->
+                    runtimeCore.onToolBlock = { action ->
                         if (action is com.hsucode.core.ToolBlockAction.PushCall) {
-                            scene?.setActivity(index, "调用工具: ${action.toolName} ${action.arguments.take(80)}")
+                            val activity = "调用工具: ${action.toolName} ${action.arguments.take(100)}"
+                            scene?.setTool(workerRunId, action.toolName, activity)
+                            controlScope.launch {
+                                recordEvent(runId, workerRunId, agentName, "tool_call", SubAgentSceneState.Status.RUNNING, activity)
+                            }
                         }
                     }
-                    val job = core.run(buildTaskPrompt(def, task), this)
+                    val job = runtimeCore.run(buildTaskPrompt(task), this)
                     job.join()
-                    collector.cancel()
+                    collector.cancelAndJoin()
+                }
+                if (cancelledWorkers.remove(workerRunId) || runtimeCore.state.value is AgentState.Interrupted) {
+                    val message = "用户已取消"
+                    scene?.fail(workerRunId, SubAgentSceneState.Status.CANCELLED, message)
+                    recordEvent(runId, workerRunId, agentName, "cancelled", SubAgentSceneState.Status.CANCELLED, message)
+                    return@withTimeout result(agentName, false, message, "cancelled", workerRunId)
+                }
+                val coreError = (runtimeCore.state.value as? AgentState.Error)?.message
+                if (coreError != null) {
+                    scene?.fail(workerRunId, SubAgentSceneState.Status.FAILED, coreError)
+                    recordEvent(runId, workerRunId, agentName, "failed", SubAgentSceneState.Status.FAILED, coreError)
+                    return@withTimeout result(agentName, false, coreError, "failed", workerRunId)
                 }
                 val text = buf.toString().ifBlank { "(无输出)" }.take(3000)
-                scene?.setResult(index, text)
-                // L3:用整任务累计 token(而非仅最后一次调用),避免多轮子智能体被低估。
-                AgentStats.addSubAgentRun(core.cumulativePromptTokens, core.cumulativeCompletionTokens)
-                result(agentName, true, text)
-            } ?: run {
-                scene?.setResult(index, "超时(${TASK_TIMEOUT_MS / 1000}s)")
-                result(agentName, false, "超时(${TASK_TIMEOUT_MS / 1000}s)")
+                scene?.complete(workerRunId, text)
+                recordEvent(runId, workerRunId, agentName, "completed", SubAgentSceneState.Status.SUCCEEDED, text.take(2000))
+                AgentStats.addSubAgentRun(runtimeCore.cumulativePromptTokens, runtimeCore.cumulativeCompletionTokens)
+                result(agentName, true, text, "succeeded", workerRunId)
             }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            // L4:用户 Stop / 上层取消要向上传播,不能吞成"伪失败"文案。
+        } catch (e: TimeoutCancellationException) {
+            core?.stop()
+            val message = "执行超时(${TASK_TIMEOUT_MS / 60_000}分钟)"
+            scene?.fail(workerRunId, SubAgentSceneState.Status.TIMED_OUT, message)
+            recordEvent(runId, workerRunId, agentName, "timed_out", SubAgentSceneState.Status.TIMED_OUT, message)
+            result(agentName, false, message, "timed_out", workerRunId)
+        } catch (e: CancellationException) {
+            core?.stop()
+            scene?.fail(workerRunId, SubAgentSceneState.Status.CANCELLED, "任务已停止")
+            withContext(NonCancellable) {
+                recordEvent(runId, workerRunId, agentName, "cancelled", SubAgentSceneState.Status.CANCELLED, "任务已停止")
+            }
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "sub-agent $agentName failed: ${e.message}")
-            scene?.setResult(index, "错误: ${e.message?.take(200)}")
-            result(agentName, false, "错误: ${e.message?.take(200)}")
+            val message = "错误: ${e.message?.take(200) ?: "未知错误"}"
+            scene?.fail(workerRunId, SubAgentSceneState.Status.FAILED, message)
+            recordEvent(runId, workerRunId, agentName, "failed", SubAgentSceneState.Status.FAILED, message)
+            result(agentName, false, message, "failed", workerRunId)
+        } finally {
+            activeCores.remove(workerRunId)
         }
-        scene?.setStatus(index, if (r.optBoolean("success")) SubAgentSceneState.Status.DONE else SubAgentSceneState.Status.FAILED)
-        return r
     }
 
     /** 用子智能体类型的专属工具集 + 角色系统提示,构造隔离 AgentCore。 */
-    private fun buildCore(def: SubAgentEntity): AgentCore {
+    private fun buildCore(def: SubAgentEntity, workerRunId: String, runId: String): AgentCore {
         val reg = ToolRegistry()
         val toolNames = def.toolNames.split(",").map { it.trim() }.filter { it.isNotEmpty() }
             .ifEmpty { READONLY_DEFAULT }
@@ -200,13 +293,108 @@ class SubAgentTool(
             systemPrompt = buildSystemPrompt(def)
         ).also {
             it.isReviewFork = true // 不递归触发后台复盘
-            // B4 修复:子智能体后台自主运行、没有 UI 确认。默认 ASK 模式下若无 confirmHandler,
-            // NeedConfirm 会被自动拒绝,导致 web_search/web_fetch/invoke_skill 全被拒(联网功能形同虚设)。
-            // 这里给它一个自动放行【安全只读/联网/技能】工具的处理器;其余(如 shell 写操作)仍拒绝。
-            it.setConfirmHandler { cmd, _ ->
-                if (cmd.toolName in SAFE_AUTO_ALLOW) ToolConfirmResult.ALLOW_ONCE else ToolConfirmResult.DENY
+            it.setConfirmHandler { cmd, preview ->
+                val room = scene ?: return@setConfirmHandler ToolConfirmResult.DENY
+                recordEvent(
+                    runId,
+                    workerRunId,
+                    def.name,
+                    "approval_requested",
+                    SubAgentSceneState.Status.WAITING_PERMISSION,
+                    "${cmd.toolName}: ${preview.take(500)}"
+                )
+                val result = withTimeoutOrNull(APPROVAL_TIMEOUT_MS) {
+                    room.awaitApproval(
+                        workerRunId = workerRunId,
+                        toolName = cmd.toolName,
+                        preview = preview,
+                        isIrreversible = cmd.reversibility == Reversibility.IRREVERSIBLE
+                    )
+                } ?: ToolConfirmResult.DENY
+                recordEvent(
+                    runId,
+                    workerRunId,
+                    def.name,
+                    "approval_resolved",
+                    SubAgentSceneState.Status.RUNNING,
+                    "${cmd.toolName}: ${result.name.lowercase()}"
+                )
+                result
             }
         }
+    }
+
+    private fun cancelWorker(workerRunId: String) {
+        val worker = scene?.worker(workerRunId) ?: return
+        if (!worker.status.isActive) return
+        cancelledWorkers.add(workerRunId)
+        scene.fail(workerRunId, SubAgentSceneState.Status.CANCELLED, "正在停止")
+        activeCores[workerRunId]?.stop()
+        controlScope.launch {
+            recordEvent(worker.runId, workerRunId, worker.agent, "cancel_requested", SubAgentSceneState.Status.CANCELLED, "用户停止单项任务")
+        }
+    }
+
+    private fun stopAll() {
+        val workers = scene?.snapshot?.value?.workers.orEmpty().filter { it.status.isActive }
+        workers.forEach { worker ->
+            cancelledWorkers.add(worker.workerRunId)
+            scene?.fail(worker.workerRunId, SubAgentSceneState.Status.CANCELLED, "正在停止")
+            activeCores[worker.workerRunId]?.stop()
+        }
+    }
+
+    private fun retryWorker(workerRunId: String) {
+        val worker = scene?.worker(workerRunId) ?: return
+        if (!worker.status.isTerminal) return
+        val retried = scene.prepareRetry(workerRunId) ?: return
+        cancelledWorkers.remove(workerRunId)
+        controlScope.launch {
+            runCatching { database.commandRoomHistoryDao().reopenRun(retried.runId) }
+            recordEvent(retried.runId, workerRunId, retried.agent, "retry", SubAgentSceneState.Status.QUEUED, "第 ${retried.attempt} 次执行")
+            val result = workerSemaphore.withPermit {
+                runOne(retried.runId, workerRunId, retried.agent, retried.task)
+            }
+            val outcome = if (result.optBoolean("success")) "completed" else result.optString("outcome", "failed")
+            finishHistoryRun(retried.runId, outcome)
+            scene.finishRun()
+        }
+    }
+
+    private suspend fun recordRun(run: CommandRoomRunEntity) {
+        runCatching { database.commandRoomHistoryDao().insertRun(run) }
+            .onFailure { Log.w(TAG, "command room run history failed: ${it.message}") }
+    }
+
+    private suspend fun recordEvent(
+        runId: String,
+        workerRunId: String,
+        agent: String,
+        type: String,
+        status: SubAgentSceneState.Status,
+        content: String
+    ) {
+        runCatching {
+            database.commandRoomHistoryDao().insertEvent(
+                CommandRoomEventEntity(
+                    runId = runId,
+                    workerRunId = workerRunId,
+                    agent = agent,
+                    type = type,
+                    status = status.name,
+                    content = content
+                )
+            )
+        }.onFailure { Log.w(TAG, "command room event history failed: ${it.message}") }
+    }
+
+    private suspend fun finishHistoryRun(runId: String, outcome: String) {
+        runCatching {
+            val dao = database.commandRoomHistoryDao()
+            dao.finishRun(runId, outcome)
+            dao.deleteEventsOutsideRecentRuns()
+            dao.deleteRunsOutsideRecentRuns()
+        }.onFailure { Log.w(TAG, "command room history cleanup failed: ${it.message}") }
     }
 
     private fun buildSystemPrompt(def: SubAgentEntity): String = buildString {
@@ -220,10 +408,20 @@ class SubAgentTool(
         append("\n完成后用简洁中文直接汇报你的结论/产出,不复述工具细节。")
     }
 
-    private fun buildTaskPrompt(def: SubAgentEntity, task: String): String =
+    private fun buildTaskPrompt(task: String): String =
         "你被主脑指派了一个子任务。\n子任务:$task\n\n请用你的专属技能与工具完成,完成后简洁汇报结论。"
 
-    private fun result(agent: String, ok: Boolean, text: String) = JSONObject().apply {
-        put("agent", agent); put("success", ok); put("result", text)
+    private fun result(
+        agent: String,
+        ok: Boolean,
+        text: String,
+        outcome: String,
+        workerRunId: String
+    ) = JSONObject().apply {
+        put("worker_run_id", workerRunId)
+        put("agent", agent)
+        put("success", ok)
+        put("outcome", outcome)
+        put("result", text)
     }
 }

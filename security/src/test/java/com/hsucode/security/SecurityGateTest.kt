@@ -72,6 +72,9 @@ class SecurityGateTest {
         val g = gate()
         assertTrue(decide(g, "file_read", "{\"path\":\"a.txt\"}", PermissionMode.ASK) is Decision.Allow)
         assertTrue(decide(g, "grep", "{\"pattern\":\"x\"}", PermissionMode.ASK) is Decision.Allow)
+        assertTrue(decide(g, "web_search", "{\"query\":\"kotlin\"}", PermissionMode.ASK) is Decision.Allow)
+        assertTrue(decide(g, "web_fetch", "{\"url\":\"https://example.com\"}", PermissionMode.ASK) is Decision.Allow)
+        assertTrue(decide(g, "invoke_skill", "{\"name\":\"review\"}", PermissionMode.ASK) is Decision.Allow)
     }
 
     // gap-15:只读模式放行只读、拒绝写。

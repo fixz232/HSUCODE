@@ -9,6 +9,14 @@ HSUCODE is a modified work based on the following upstream project:
 
 ## Modification Log
 
+### 2026-08-04 19:23 (UTC+08:00)
+
+- Rebuilt the agent command room as a native run console with a compact, collapsible pixel-office scene.
+- Added stable worker-run identities, cancellation, retry, stop-all, terminal-state cleanup, and keyed permission approvals.
+- Added persisted command-room run and event history with Room schema version 41 and interrupted-run recovery.
+- Hardened the local WebView bridge, reduced idle animation work, and clarified safe read-only network and skill operations.
+- Fixed the sidebar search-field layout and added the user-provided square HSUCODE profile image.
+
 ### 2026-08-04 17:26 (UTC+08:00)
 
 - Added password-protected, encrypted full backup and cross-device restore for HSUCODE-owned data, including the database, attachments, and portable credential recovery.

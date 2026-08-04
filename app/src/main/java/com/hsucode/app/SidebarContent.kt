@@ -1,13 +1,19 @@
 package com.hsucode.app
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Add
@@ -31,8 +37,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
@@ -116,6 +128,9 @@ fun SidebarContent(
     val Sub = xc.sub
     val Accent = xc.green
     val Divider = xc.divider
+    val focusManager = LocalFocusManager.current
+    val searchInteraction = remember { MutableInteractionSource() }
+    val searchFocused by searchInteraction.collectIsFocusedAsState()
 
     Column(
         Modifier
@@ -124,20 +139,26 @@ fun SidebarContent(
             .fillMaxWidth(0.82f)
             .background(Bg)
     ) {
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 20.dp, end = 8.dp, top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 16.dp, bottom = 16.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                Image(
+                    painter = painterResource(R.drawable.hsucode_profile),
+                    contentDescription = "HSUCODE 头像",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp))
+                )
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭导航", tint = Sub)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
             Text(
                 "HSUCODE",
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 20.sp,
-                color = Ink,
-                modifier = Modifier.weight(1f)
+                color = Ink
             )
-            IconButton(onClick = onClose) {
-                Icon(Icons.Outlined.Close, contentDescription = "关闭导航", tint = Sub)
-            }
         }
 
         // ── New session capsule ──
@@ -174,33 +195,42 @@ fun SidebarContent(
             modifier = Modifier
                 .padding(horizontal = 12.dp)
                 .fillMaxWidth()
-                .height(48.dp)
+                .height(52.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(xc.bgElevated)
-                .padding(horizontal = 8.dp),
+                .border(
+                    width = 1.dp,
+                    color = if (searchFocused) Accent else xc.border,
+                    shape = RoundedCornerShape(8.dp)
+                )
+                .padding(start = 14.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Outlined.Search, null, Modifier.size(20.dp), tint = xc.sub)
-            Spacer(Modifier.width(6.dp))
-            TextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                singleLine = true,
-                placeholder = { Text("搜索对话", fontSize = 14.sp, color = xc.faint) },
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    cursorColor = Ink,
-                    focusedTextColor = Ink,
-                    unfocusedTextColor = Ink
-                ),
-                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp),
-                modifier = Modifier.weight(1f)
-            )
+            Icon(Icons.Outlined.Search, contentDescription = "搜索", modifier = Modifier.size(20.dp), tint = xc.sub)
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.CenterStart) {
+                if (searchQuery.isEmpty()) {
+                    Text("搜索对话", style = MaterialTheme.typography.bodyMedium, color = xc.sub)
+                }
+                BasicTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = Ink,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                        fontFamily = FontFamily.Default
+                    ),
+                    cursorBrush = SolidColor(Accent),
+                    interactionSource = searchInteraction,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             if (searchQuery.isNotBlank()) {
-                IconButton(onClick = { searchQuery = "" }) {
+                IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Outlined.Close, "清除", Modifier.size(18.dp), tint = xc.sub)
                 }
             }

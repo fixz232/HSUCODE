@@ -49,7 +49,7 @@ import javax.crypto.spec.SecretKeySpec
 object BackupManager {
     private const val TAG = "BackupManager"
     private const val FORMAT = "hsucode.backup.v1"
-    private const val DB_SCHEMA_VERSION = 40
+    private const val DB_SCHEMA_VERSION = 41
     private const val MAX_ENTRY_COUNT = 20_000
     private const val MAX_TOTAL_BYTES = 1024L * 1024 * 1024
     private const val PENDING_DIR = "restore_pending"

@@ -145,6 +145,7 @@ class MainActivity : ComponentActivity() {
             val goalSessions by app.goalSessionsFlow.collectAsState(initial = emptyList())
             val projects by app.projectListFlow.collectAsState(initial = emptyList())
             val groupRooms by app.database.groupRoomDao().observeRooms().collectAsState(initial = emptyList())
+            val subAgentSceneSnapshot by app.subAgentScene.snapshot.collectAsState()
             // 从侧栏直接点进某个房间时带上 id,群聊页据此跳过列表直接开那间
             var openRoomId by remember { mutableStateOf<Long?>(null) }
             val allIdentities by app.identityListFlow.collectAsState(initial = emptyList())
@@ -296,7 +297,7 @@ class MainActivity : ComponentActivity() {
                             onNavigateToAgentScene = { currentPage = "agent_scene" },
                             onNavigateToStats = { currentPage = "stats" },
                             onNavigateToTerminal = { terminalOrigin = "chat"; currentPage = "terminal" },
-                            subAgentActive = app.subAgentScene.brainBusy,
+                            subAgentActive = subAgentSceneSnapshot.brainBusy,
                             ttsHelper = ttsHelper,
                             onOpenDrawer = { drawerScope.launch { drawerState.open() } },
                             planState = app.planState,

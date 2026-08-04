@@ -1,59 +1,274 @@
 package com.hsucode.app
 
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateList
+import com.hsucode.security.ToolConfirmResult
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
-/**
- * 「智能体指挥室」像素动画的实时状态(Application 级)。由 [SubAgentTool] 在派活/执行/完成时更新,
- * [SubAgentScene] 读取渲染:能看到主脑 + 每个子智能体各自领了什么活、处于准备/执行/完成/失败。
- */
-class SubAgentSceneState {
-    enum class Status { PREPARING, RUNNING, DONE, FAILED }
-    /**
-     * @param activity 实时动作(执行中不断刷新的输出尾部,让用户点进去能看到它正在做什么)。
-     * @param result   最终结论/产出(完成或失败后写入)。
-     */
+/** Thread-safe runtime model for the agent command room. */
+class SubAgentSceneState(
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val idFactory: () -> String = { UUID.randomUUID().toString() }
+) {
+    enum class Status {
+        QUEUED,
+        PREPARING,
+        RUNNING,
+        WAITING_PERMISSION,
+        SUCCEEDED,
+        FAILED,
+        CANCELLED,
+        TIMED_OUT,
+        UNKNOWN;
+
+        val isActive: Boolean
+            get() = this == QUEUED || this == PREPARING || this == RUNNING || this == WAITING_PERMISSION
+        val isTerminal: Boolean get() = !isActive
+    }
+
     data class Worker(
+        val workerRunId: String,
+        val runId: String,
         val agent: String,
         val task: String,
-        val status: Status,
+        val status: Status = Status.QUEUED,
+        val currentTool: String = "",
         val activity: String = "",
-        val result: String = ""
+        val result: String = "",
+        val error: String = "",
+        val attempt: Int = 1,
+        val createdAt: Long,
+        val startedAt: Long = 0,
+        val finishedAt: Long = 0,
+        val updatedAt: Long = createdAt
     )
 
-    val workers: SnapshotStateList<Worker> = mutableStateListOf()
-    /** 面板是否显示。 */
-    var visible by mutableStateOf(false)
-    /** 主脑是否还在"指挥/汇总"(有 worker 在跑时为 true)。 */
-    var brainBusy by mutableStateOf(false)
+    data class ApprovalRequest(
+        val requestId: String,
+        val workerRunId: String,
+        val agent: String,
+        val toolName: String,
+        val preview: String,
+        val isIrreversible: Boolean,
+        val createdAt: Long
+    )
 
-    /** 开一场:登记所有分配,全部置为"准备"。 */
-    fun begin(items: List<Pair<String, String>>) {
-        workers.clear()
-        items.forEach { workers.add(Worker(it.first, it.second, Status.PREPARING)) }
-        visible = items.isNotEmpty()
-        brainBusy = items.isNotEmpty()
+    data class Snapshot(
+        val runId: String = "",
+        val workers: List<Worker> = emptyList(),
+        val approvals: List<ApprovalRequest> = emptyList(),
+        val visible: Boolean = false,
+        val startedAt: Long = 0,
+        val endedAt: Long = 0
+    ) {
+        val brainBusy: Boolean get() = workers.any { it.status.isActive }
     }
 
-    fun setStatus(index: Int, status: Status) {
-        if (index in workers.indices) workers[index] = workers[index].copy(status = status)
+    private val _snapshot = MutableStateFlow(Snapshot())
+    val snapshot: StateFlow<Snapshot> = _snapshot.asStateFlow()
+
+    private val approvalDeferreds = ConcurrentHashMap<String, CompletableDeferred<ToolConfirmResult>>()
+
+    @Volatile private var cancelWorkerAction: (String) -> Unit = {}
+    @Volatile private var retryWorkerAction: (String) -> Unit = {}
+    @Volatile private var stopAllAction: () -> Unit = {}
+
+    fun bindActions(
+        onCancelWorker: (String) -> Unit,
+        onRetryWorker: (String) -> Unit,
+        onStopAll: () -> Unit
+    ) {
+        cancelWorkerAction = onCancelWorker
+        retryWorkerAction = onRetryWorker
+        stopAllAction = onStopAll
     }
 
-    /** 执行中不断刷新的实时动作(输出尾部)。 */
-    fun setActivity(index: Int, activity: String) {
-        if (index in workers.indices) workers[index] = workers[index].copy(activity = activity)
+    /** Starts one dispatch run and returns stable workers in assignment order. */
+    fun begin(items: List<Pair<String, String>>): List<Worker> {
+        val now = clock()
+        val runId = idFactory()
+        val workers = items.mapIndexed { index, (agent, task) ->
+            Worker(
+                workerRunId = "$runId:$index",
+                runId = runId,
+                agent = agent,
+                task = task,
+                createdAt = now,
+                updatedAt = now
+            )
+        }
+        approvalDeferreds.values.forEach { it.complete(ToolConfirmResult.DENY) }
+        approvalDeferreds.clear()
+        _snapshot.value = Snapshot(
+            runId = runId,
+            workers = workers,
+            visible = workers.isNotEmpty(),
+            startedAt = if (workers.isEmpty()) 0 else now
+        )
+        return workers
     }
 
-    /** 完成/失败后的最终结论。 */
-    fun setResult(index: Int, result: String) {
-        if (index in workers.indices) workers[index] = workers[index].copy(result = result)
+    fun worker(workerRunId: String): Worker? =
+        _snapshot.value.workers.firstOrNull { it.workerRunId == workerRunId }
+
+    fun setStatus(workerRunId: String, status: Status, message: String = "") {
+        updateWorker(workerRunId) { worker ->
+            val now = clock()
+            worker.copy(
+                status = status,
+                activity = message.ifBlank { worker.activity },
+                startedAt = if (status == Status.RUNNING && worker.startedAt == 0L) now else worker.startedAt,
+                finishedAt = if (status.isTerminal) now else 0,
+                updatedAt = now
+            )
+        }
     }
 
-    /** 全部跑完:主脑停止忙碌,但保留最终画面直到下次 begin 或用户关闭。 */
-    fun finishAll() { brainBusy = false }
+    fun setTool(workerRunId: String, toolName: String, activity: String = "") {
+        updateWorker(workerRunId) {
+            it.copy(currentTool = toolName, activity = activity.ifBlank { it.activity }, updatedAt = clock())
+        }
+    }
 
-    fun close() { workers.clear(); visible = false; brainBusy = false }
+    fun setActivity(workerRunId: String, activity: String) {
+        updateWorker(workerRunId) { it.copy(activity = activity, updatedAt = clock()) }
+    }
+
+    fun complete(workerRunId: String, result: String) {
+        updateWorker(workerRunId) {
+            val now = clock()
+            it.copy(
+                status = Status.SUCCEEDED,
+                result = result,
+                error = "",
+                currentTool = "",
+                finishedAt = now,
+                updatedAt = now
+            )
+        }
+    }
+
+    fun fail(workerRunId: String, status: Status = Status.FAILED, error: String) {
+        require(status.isTerminal) { "Failure status must be terminal" }
+        updateWorker(workerRunId) {
+            val now = clock()
+            it.copy(
+                status = status,
+                error = error,
+                currentTool = "",
+                finishedAt = now,
+                updatedAt = now
+            )
+        }
+    }
+
+    fun prepareRetry(workerRunId: String): Worker? {
+        var retried: Worker? = null
+        updateWorker(workerRunId) {
+            val now = clock()
+            it.copy(
+                status = Status.QUEUED,
+                currentTool = "",
+                activity = "等待重新执行",
+                result = "",
+                error = "",
+                attempt = it.attempt + 1,
+                startedAt = 0,
+                finishedAt = 0,
+                updatedAt = now
+            ).also { worker -> retried = worker }
+        }
+        return retried
+    }
+
+    fun finishRun() {
+        _snapshot.update { state -> state.copy(endedAt = clock()) }
+    }
+
+    fun requestCancel(workerRunId: String) {
+        denyApprovalsForWorker(workerRunId)
+        cancelWorkerAction(workerRunId)
+    }
+
+    fun requestRetry(workerRunId: String) = retryWorkerAction(workerRunId)
+
+    fun requestStopAll() {
+        _snapshot.value.approvals.forEach { resolveApproval(it.requestId, ToolConfirmResult.DENY) }
+        stopAllAction()
+    }
+
+    suspend fun awaitApproval(
+        workerRunId: String,
+        toolName: String,
+        preview: String,
+        isIrreversible: Boolean
+    ): ToolConfirmResult {
+        val worker = worker(workerRunId) ?: return ToolConfirmResult.DENY
+        val request = ApprovalRequest(
+            requestId = idFactory(),
+            workerRunId = workerRunId,
+            agent = worker.agent,
+            toolName = toolName,
+            preview = preview,
+            isIrreversible = isIrreversible,
+            createdAt = clock()
+        )
+        val deferred = CompletableDeferred<ToolConfirmResult>()
+        approvalDeferreds[request.requestId] = deferred
+        _snapshot.update { state ->
+            state.copy(
+                workers = state.workers.map {
+                    if (it.workerRunId == workerRunId) it.copy(
+                        status = Status.WAITING_PERMISSION,
+                        currentTool = toolName,
+                        activity = "等待权限审批",
+                        updatedAt = clock()
+                    ) else it
+                },
+                approvals = state.approvals + request
+            )
+        }
+        return try {
+            deferred.await()
+        } finally {
+            approvalDeferreds.remove(request.requestId)
+            _snapshot.update { state ->
+                state.copy(
+                    approvals = state.approvals.filterNot { it.requestId == request.requestId },
+                    workers = state.workers.map {
+                        if (it.workerRunId == workerRunId && it.status == Status.WAITING_PERMISSION) {
+                            it.copy(status = Status.RUNNING, activity = "权限审批已处理", updatedAt = clock())
+                        } else it
+                    }
+                )
+            }
+        }
+    }
+
+    fun resolveApproval(requestId: String, result: ToolConfirmResult): Boolean =
+        approvalDeferreds[requestId]?.complete(result) == true
+
+    fun close() {
+        approvalDeferreds.values.forEach { it.complete(ToolConfirmResult.DENY) }
+        approvalDeferreds.clear()
+        _snapshot.value = Snapshot()
+    }
+
+    private fun denyApprovalsForWorker(workerRunId: String) {
+        _snapshot.value.approvals
+            .filter { it.workerRunId == workerRunId }
+            .forEach { resolveApproval(it.requestId, ToolConfirmResult.DENY) }
+    }
+
+    private inline fun updateWorker(workerRunId: String, transform: (Worker) -> Worker) {
+        _snapshot.update { state ->
+            state.copy(workers = state.workers.map {
+                if (it.workerRunId == workerRunId) transform(it) else it
+            })
+        }
+    }
 }
