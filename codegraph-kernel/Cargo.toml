@@ -10,7 +10,7 @@ description = "Native extraction kernel for CodeGraph — tree-sitter parse+extr
 crate-type = ["cdylib"]
 
 [dependencies]
-# XINCODE:Android JNI 绑定
+# HSUCODE:Android JNI 绑定
 jni = "0.21"
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"

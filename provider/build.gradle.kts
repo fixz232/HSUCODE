@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.xincode.provider"
+    namespace = "com.hsucode.provider"
     compileSdk = 34
 
     defaultConfig {

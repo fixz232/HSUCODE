@@ -1,4 +1,4 @@
-XINCODE 指挥室像素素材来源 / Asset Attribution
+HSUCODE 指挥室像素素材来源 / Asset Attribution
 ================================================
 
 角色 sprite(characters/ char_0..char_5)

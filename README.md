@@ -1,4 +1,4 @@
-# XINCODE
+# HSUCODE
 
 **纯 Kotlin 原生 Android AI 智能体。** 一个运行在手机上的自主 AI Agent:多供应商接入、工具调用循环、子智能体并行协作、长期记忆、内置 root/Ubuntu 环境与终端,以及像素风「智能体指挥室」实时动画。从零构建,无跨端框架。
 
@@ -48,7 +48,7 @@
 
 ```bash
 git clone <this-repo-url>
-cd XINCODE
+cd HSUCODE
 ./gradlew :app:assembleDebug
 # 产物:app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -62,8 +62,8 @@ cd XINCODE
 1. 复制模板:`cp keystore.properties.example keystore.properties`
 2. 若还没有密钥,生成一个:
    ```bash
-   keytool -genkeypair -v -keystore xincode-release.jks \
-     -alias xincode -keyalg RSA -keysize 2048 -validity 10000
+   keytool -genkeypair -v -keystore hsucode-release.jks \
+     -alias hsucode -keyalg RSA -keysize 2048 -validity 10000
    ```
 3. 把 `keystore.properties` 里的四项填成你的真实值(`storeFile` / `storePassword` / `keyAlias` / `keyPassword`)。
 4. 打签名包:
@@ -92,7 +92,7 @@ cd XINCODE
 
 ## ⚙️ 使用前配置
 
-首次启动后,进入设置填写你自己的 LLM 供应商信息(端点 + API Key + 模型)。XINCODE 不内置任何托管密钥,所有请求都直连你配置的供应商。
+首次启动后,进入设置填写你自己的 LLM 供应商信息(端点 + API Key + 模型)。HSUCODE 不内置任何托管密钥,所有请求都直连你配置的供应商。
 
 ---
 
@@ -106,7 +106,7 @@ cd XINCODE
 
 ## 🙏 致谢
 
-XINCODE 在设计过程中参考了多个开源 AI 智能体的公开设计思路(*inspired by*,并未搬运/移植其代码):
+HSUCODE 在设计过程中参考了多个开源 AI 智能体的公开设计思路(*inspired by*,并未搬运/移植其代码):
 
 - [xai-org/grok](https://github.com/xai-org) — 工具调用循环与终端 agent 交互思路
 - [NousResearch](https://github.com/NousResearch) Hermes 系列 — 自进化学习闭环、精编记忆、零上下文工具-RPC 等设计思路

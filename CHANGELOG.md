@@ -7,7 +7,7 @@
 **严重:AI 能把应用自己的数据库搞坏,导致全部数据丢失**
 
 有用户让 AI 自行安装技能,AI 在过程中动到了应用自己的私有目录,下次启动报
-`Cannot open database ... xincode.db is not readable`,应用只能重建一个空库 ——
+`Cannot open database ... hsucode.db is not readable`,应用只能重建一个空库 ——
 会话、身份卡、供应商配置、记忆全没了。设备 root 之后尤其容易踩到:`shell_exec` 会自动走 root,
 一个 `chmod`/`chown` 落在那个目录里,文件就变成 root 所有,应用自己反而读不了。
 
@@ -201,7 +201,7 @@
 - **多配置环境**:配置完全隔离,可导出导入(导出文件**不含 API Key**)。
 - **用量分析**:30 天趋势、模型分布、成本估算、缓存命中率。
 - **日志查看**:应用日志与崩溃日志,按级别和关键词过滤。
-- **局域网设备发现**:发现同一 WiFi 下的其他 XINCODE 设备。
+- **局域网设备发现**:发现同一 WiFi 下的其他 HSUCODE 设备。
 
 ## [1.04]
 
@@ -286,7 +286,7 @@
 
 ## [1.0] - 首个公开正式版
 
-XINCODE 是一个运行在 Android 上的自主 AI 智能体,纯 Kotlin 原生实现。首个公开版本包含以下能力:
+HSUCODE 是一个运行在 Android 上的自主 AI 智能体,纯 Kotlin 原生实现。首个公开版本包含以下能力:
 
 ### 智能体核心
 - 多供应商接入:OpenAI 兼容 / DeepSeek / Anthropic 等,支持自定义端点与模型清单

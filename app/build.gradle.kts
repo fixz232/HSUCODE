@@ -13,11 +13,11 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.xincode.app"
+    namespace = "com.hsucode.app"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.xincode.app"
+        applicationId = "com.hsucode.app"
         minSdk = 28
         targetSdk = 34
         versionCode = 109          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
@@ -32,7 +32,7 @@ android {
             create("release") {
                 // 必须用 rootProject.file():在 app 模块里 file("x.jks") 会相对【app/ 目录】解析,
                 // 而 keystore.properties 与 .jks 都放在【仓库根】(CI 的 Decode keystore 步骤也写在根),
-                // 用 file() 会去找 app/xincode-release.jks 从而报 "Keystore file not found"。
+                // 用 file() 会去找 app/hsucode-release.jks 从而报 "Keystore file not found"。
                 // rootProject.file() 以仓库根为基准;若给的是绝对路径也能正确处理。
                 storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
                 storePassword = keystoreProperties.getProperty("storePassword")

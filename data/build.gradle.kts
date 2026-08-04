@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.xincode.data"
+    namespace = "com.hsucode.data"
     compileSdk = 34
 
     defaultConfig {
@@ -19,6 +19,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
 }
 
 dependencies {

@@ -17,7 +17,7 @@
 #![deny(clippy::all)]
 
 mod buffers;
-// XINCODE:Android JNI 出口(上游内核代码保持原样,只在旁边加一层薄绑定)
+// HSUCODE:Android JNI 出口(上游内核代码保持原样,只在旁边加一层薄绑定)
 mod jni_api;
 mod ccpp;
 mod cfnptr;
@@ -228,7 +228,7 @@ pub fn extract_file(file_path: String, content: String, language: String) -> Res
     })
 }
 
-/// XINCODE 加的:不经过 napi 的原始入口,JNI 层直接用它。
+/// HSUCODE 加的:不经过 napi 的原始入口,JNI 层直接用它。
 /// 分发逻辑与上游 `extract_file` 完全一致,只是不包 napi 的类型。
 pub(crate) fn extract_raw(
     file_path: &str,

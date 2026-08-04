@@ -13,7 +13,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "XINCODE"
+rootProject.name = "HSUCODE"
 
 include(":app")
 include(":core")

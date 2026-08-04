@@ -144,7 +144,7 @@ fn buffers_to_json(out: &crate::buffers::EmitOut) -> String {
 /// 失败不该中断整批,调用方看到 error 字段跳过这个文件即可。
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_com_xincode_tools_CodeGraphNative_extractFile(
+pub extern "system" fn Java_com_hsucode_tools_CodeGraphNative_extractFile(
     mut env: JNIEnv,
     _class: JClass,
     path: JString,
@@ -179,7 +179,7 @@ pub extern "system" fn Java_com_xincode_tools_CodeGraphNative_extractFile(
 /// 返回内核支持的语言列表,给 Kotlin 侧判断某个扩展名要不要送进来。
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn Java_com_xincode_tools_CodeGraphNative_supportedLanguages(
+pub extern "system" fn Java_com_hsucode_tools_CodeGraphNative_supportedLanguages(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {

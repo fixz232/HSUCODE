@@ -1,6 +1,6 @@
 # 第三方声明 / Third-Party Notices
 
-XINCODE 主体代码采用 **GPL-3.0-or-later** 许可(见 LICENSE)。除此之外,以下第三方素材与依赖被打包/引用,依其各自许可协议使用与再分发。
+HSUCODE 主体代码采用 **GPL-3.0-or-later** 许可(见 LICENSE)。除此之外,以下第三方素材与依赖被打包/引用,依其各自许可协议使用与再分发。
 
 ## 字体 / Fonts
 
@@ -37,10 +37,10 @@ XINCODE 主体代码采用 **GPL-3.0-or-later** 许可(见 LICENSE)。除此之�
 
 ## 致谢 / Acknowledgements
 
-XINCODE 在设计过程中参考了多个开源 AI 智能体的公开设计思路,以下项目对本工程的架构与能力选型有启发,谨此致敬:
+HSUCODE 在设计过程中参考了多个开源 AI 智能体的公开设计思路,以下项目对本工程的架构与能力选型有启发,谨此致敬:
 
 - [xai-org/grok](https://github.com/xai-org)(工具调用循环与终端 agent 交互思路)
 - [NousResearch](https://github.com/NousResearch)Hermes 系列(自进化学习闭环、精编记忆、零上下文工具-RPC 等设计思路)
 - [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents)(像素办公室场景灵感与素材来源)
 
-XINCODE 为纯 Kotlin 原生 Android 实现,并未搬运/移植上述任何项目的代码——上述致谢仅表明部分能力思路受其启发(inspired by)。
+HSUCODE 为纯 Kotlin 原生 Android 实现,并未搬运/移植上述任何项目的代码——上述致谢仅表明部分能力思路受其启发(inspired by)。
