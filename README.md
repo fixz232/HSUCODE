@@ -4,6 +4,8 @@
 
 > 版本:**1.14**(versionCode 114) · 许可:**GPL-3.0-or-later**（第三方组件按各自许可证）
 
+源码仓库：[fixz232/HSUCODE](https://github.com/fixz232/HSUCODE) · 默认分支：`main`
+
 ---
 
 ## 上游与修改声明
@@ -59,7 +61,7 @@
 ### Debug 包(无需签名密钥)
 
 ```bash
-git clone <this-repo-url>
+git clone https://github.com/fixz232/HSUCODE.git
 cd HSUCODE
 ./gradlew :app:assembleDebug
 # 产物:app/build/outputs/apk/debug/app-debug.apk
@@ -119,10 +121,20 @@ cd HSUCODE
 
 ## 🙏 致谢
 
-HSUCODE 在设计过程中参考了多个开源 AI 智能体的公开设计思路(*inspired by*,并未搬运/移植其代码):
+感谢以下项目、作者和社区提供的代码、素材、协议或公开设计思路。HSUCODE 与这些项目没有官方隶属、赞助或背书关系；具体改编文件、固定提交和许可证以 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 为准。
 
-- [xai-org/grok](https://github.com/xai-org) — 工具调用循环与终端 agent 交互思路
-- [NousResearch](https://github.com/NousResearch) Hermes 系列 — 自进化学习闭环、精编记忆、零上下文工具-RPC 等设计思路
-- [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) — 像素办公室场景灵感与素材来源
-- [AAswordman/Operit](https://github.com/AAswordman/Operit) — 部分智能体工作台、身份卡和 OAuth 功能参考与改编（LGPL-3.0）
-- [rikkahub/rikkahub](https://github.com/rikkahub/rikkahub) — 聊天主页、模型中心、免 Root 工作区及终端能力参考与改编（AGPL-3.0）
+| 项目 / 作者 | 在 HSUCODE 中的用途 | 关系与许可证 |
+| --- | --- | --- |
+| [kusesad-1122/XINCODE-Public](https://github.com/kusesad-1122/XINCODE-Public) | 原始 Android Agent 基线、核心功能和历史代码 | 修改基础；原始版权与 GPL 声明保留 |
+| [AAswordman/Operit](https://github.com/AAswordman/Operit) | 身份/角色卡、GitHub OAuth 设备流、部分智能体工作台能力 | 部分代码改编与功能参考；LGPL-3.0 |
+| [rikkahub/rikkahub](https://github.com/rikkahub/rikkahub) | 聊天主页与模型中心交互、供应商图标、免 Root 工作区、PRoot/PTY 接入 | 部分代码改编；资源和二进制按 AGPL-3.0 声明 |
+| [termux/termux-app](https://github.com/termux/termux-app) | Termux terminal-emulator / terminal-view PTY 运行时 | 依赖其 GPLv3 与终端模拟器例外条款 |
+| [xai-org/grok](https://github.com/xai-org) | 工具调用循环、终端 Agent 交互思路 | 公开设计思路参考 |
+| [NousResearch](https://github.com/NousResearch) Hermes 系列 | 自进化学习、精编记忆、工具 RPC 等设计思路 | 公开设计思路参考 |
+| [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) | 像素办公室地板、家具、装饰和场景灵感 | 部分素材按 MIT 声明 |
+| [JIK-A-4 / MetroCity](https://jik-a-4.itch.io/metrocity-free-topdown-character-pack) | 指挥室角色 sprite | CC0 1.0 |
+| [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | 终端与模型 ID 等宽字体 | SIL Open Font License 1.1 |
+| [Ubuntu](https://ubuntu.com/) | 免 Root PRoot 工作区的运行时 rootfs | 运行时从 Ubuntu 官方发布页下载并校验，不把 rootfs 打进仓库 |
+| Android Open Source Project / AndroidX / Jetpack Compose | Android 平台、UI、Room 和后台任务基础设施 | 依各组件 Apache-2.0 等许可证 |
+
+感谢所有上游维护者、贡献者和开源社区的工作。第三方许可证全文和归属信息随源码发布，不应从源码或发行包中删除。
