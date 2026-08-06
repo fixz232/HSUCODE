@@ -1,9 +1,11 @@
 package com.hsucode.app
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -37,11 +39,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AddComment
+import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Public
@@ -50,11 +55,14 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.MicNone
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.CheckCircle
@@ -72,7 +80,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -88,6 +98,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
 
 /** Pending attachment waiting to be sent with the next message. */
 data class Attachment(
@@ -98,6 +110,13 @@ data class Attachment(
     val mimeType: String = "",
     val content: String
 )
+
+private fun assistantSubtitle(assistantName: String, model: String, provider: String): String {
+    val assistant = assistantName.trim().ifBlank { "默认助手" }
+    val modelName = model.trim().ifBlank { "未配置模型" }
+    val providerName = provider.trim()
+    return if (providerName.isBlank()) "$assistant · $modelName" else "$assistant · $providerName / $modelName"
+}
 
 /**
  * 处理选择器返回的一个 URI。**必须在 IO 线程调用**(内部有同步文件读写)。
@@ -254,7 +273,11 @@ private fun HsuIcon(
 @Composable
 fun ChatScreen(
     chatState: ChatStateLike,
+    conversationTitle: String = "新聊天",
+    assistantName: String = "默认助手",
     currentModel: String = "",
+    supplierId: String = "",
+    providerName: String = "",
     availableModels: List<String> = emptyList(),
     onSwitchModel: (String) -> Unit = {},
     thinkingEnabled: Boolean = false,
@@ -267,10 +290,13 @@ fun ChatScreen(
     onNavigateToAgentScene: () -> Unit = {},
     onNavigateToStats: () -> Unit = {},
     onNavigateToTerminal: () -> Unit = {},
+    onNavigateToWorkspace: () -> Unit = {},
     subAgentActive: Boolean = false,
     ttsHelper: TtsHelper? = null,
+    voiceInputHelper: VoiceInputHelper? = null,
     powerMode: com.hsucode.core.PowerMode = com.hsucode.core.PowerMode.NORMAL,
     onOpenDrawer: () -> Unit = {},
+    onNewChat: () -> Unit = {},
     planState: PlanState? = null,
     tokenStats: TokenStats = TokenStats.EMPTY,
     onRegenerate: (Long) -> Unit = {},
@@ -309,6 +335,22 @@ fun ChatScreen(
     var unreadCount by remember(chatState) { mutableIntStateOf(0) }
     var previousMessageCount by remember(chatState) { mutableIntStateOf(0) }
     val context = LocalContext.current
+    val voiceState = voiceInputHelper?.state?.collectAsState()?.value ?: VoiceInputHelper.State.IDLE
+    val voiceFinalText = voiceInputHelper?.finalText?.collectAsState()?.value.orEmpty()
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) voiceInputHelper?.startListening()
+        else Toast.makeText(context, "需要录音权限才能使用语音输入", Toast.LENGTH_SHORT).show()
+    }
+    LaunchedEffect(voiceFinalText) {
+        if (voiceFinalText.isNotBlank()) {
+            chatState.input.value = listOf(chatState.input.value.trim(), voiceFinalText.trim())
+                .filter { it.isNotBlank() }
+                .joinToString(" ")
+            voiceInputHelper?.reset()
+        }
+    }
     // 回车行为开关(App 层可观察设置):true=回车发送;false=回车换行。读它即响应式。
     val enterToSend = (context.applicationContext as HsucodeApplication).enterToSend
     var pendingModelIdx by remember { mutableStateOf<String?>(null) }
@@ -324,6 +366,7 @@ fun ChatScreen(
     // Menu visibility
     var showMainMenu by remember { mutableStateOf(false) }
     var showEffortMenu by remember { mutableStateOf(false) }
+    var showHeaderMenu by remember { mutableStateOf(false) }
 
     // TTS state
     val ttsEnabled by (ttsHelper?.enabled?.collectAsState() ?: remember { mutableStateOf(false) })
@@ -440,50 +483,72 @@ fun ChatScreen(
 
     Column(Modifier.fillMaxSize().background(Bg)) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 4.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onOpenDrawer) {
-                Icon(Icons.Outlined.Menu, contentDescription = "打开导航", tint = Ink)
+            IconButton(onClick = onOpenDrawer, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Outlined.ArrowBack, contentDescription = "返回会话列表", tint = Ink)
             }
-            Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
-                Text("HSUCODE", style = MaterialTheme.typography.titleSmall, maxLines = 1)
+            Column(
+                Modifier.weight(1f).padding(horizontal = 8.dp)
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
+                        showMainMenu = true
+                        showEffortMenu = false
+                    }
+            ) {
                 Text(
-                    if (chatState.isStreaming.value) "正在执行" else "就绪",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (chatState.isStreaming.value) Green else Sub
+                    conversationTitle.ifBlank { "新聊天" },
+                    fontSize = 21.sp,
+                    lineHeight = 27.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Ink,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    assistantSubtitle(assistantName, currentModel, providerName),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = Sub,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            val batColor = when (powerMode) {
-                com.hsucode.core.PowerMode.POWER_SAVE -> Red
-                com.hsucode.core.PowerMode.HIGH_PERF -> Green
-                else -> Faint
-            }
-            Text(
-                powerMode.label,
-                style = MaterialTheme.typography.labelMedium,
-                color = batColor,
-                modifier = Modifier.padding(horizontal = 8.dp)
-            )
-            IconButton(onClick = onNavigateToTerminal) {
-                Icon(Icons.Outlined.Terminal, contentDescription = "终端", tint = Sub)
-            }
-            IconButton(onClick = onNavigateToAgentScene) {
-                Icon(Icons.Outlined.Groups, contentDescription = "工作视图", tint = if (subAgentActive) Green else Sub)
-            }
-            IconButton(onClick = {
-                val exportText = chatState.formatForExport()
-                val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, exportText)
-                    putExtra(Intent.EXTRA_SUBJECT, "HSUCODE 对话导出")
+            Box {
+                IconButton(onClick = { showHeaderMenu = true }, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "更多会话操作", tint = Sub)
                 }
-                context.startActivity(Intent.createChooser(intent, "分享对话"))
-            }) {
-                Icon(Icons.Outlined.Share, contentDescription = "分享对话", tint = Sub)
+                DropdownMenu(expanded = showHeaderMenu, onDismissRequest = { showHeaderMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("打开终端") },
+                        leadingIcon = { Icon(Icons.Outlined.Terminal, contentDescription = null) },
+                        onClick = { showHeaderMenu = false; onNavigateToTerminal() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (subAgentActive) "进入指挥室 · 运行中" else "进入指挥室") },
+                        leadingIcon = { Icon(Icons.Outlined.Groups, contentDescription = null) },
+                        onClick = { showHeaderMenu = false; onNavigateToAgentScene() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("分享对话") },
+                        leadingIcon = { Icon(Icons.Outlined.Share, contentDescription = null) },
+                        onClick = {
+                            showHeaderMenu = false
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, chatState.formatForExport())
+                                putExtra(Intent.EXTRA_SUBJECT, "HSUCODE 对话导出")
+                            }
+                            context.startActivity(Intent.createChooser(intent, "分享对话"))
+                        }
+                    )
+                }
+            }
+            IconButton(onClick = onNewChat, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Outlined.AddComment, contentDescription = "新建聊天", tint = Sub)
             }
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Border))
+        Box(Modifier.fillMaxWidth().height(0.5.dp).background(Border))
 
         ExecutionStrip(
             isGoalSession = isGoalSession,
@@ -495,6 +560,11 @@ fun ChatScreen(
             isRunning = chatState.isStreaming.value,
             onStop = onStopGoal
         )
+        WorkspaceQuickStrip(
+            linuxReady = WorkspaceRuntime.hasLinux(),
+            onOpenTerminal = onNavigateToTerminal,
+            onOpenWorkspace = onNavigateToWorkspace
+        )
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
@@ -503,6 +573,14 @@ fun ChatScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
+            if (turnGroups.isEmpty()) {
+                item(key = "welcome_panel") {
+                    WelcomePanel(
+                        currentModel = modelDisplayName,
+                        onPrompt = { prompt -> chatState.input.value = prompt }
+                    )
+                }
+            }
             items(turnGroups, key = { it.key }) { group ->
                 when {
                     group.isFlat && group.userMessage != null ->
@@ -635,6 +713,9 @@ fun ChatScreen(
                 // 下排:skill / MCP / 联网搜索 / 深度分析
                 PlusRow(Icons.Outlined.Bolt, "Skill", "选择技能,在输入框生成 /技能名", Ink, Sub, null) { showPlusCard = false; showSkillPicker = true }
                 PlusRow(Icons.Outlined.Extension, "MCP", "选择 MCP 服务器,生成 @服务器 引用", Ink, Sub, null) { showPlusCard = false; showMcpPicker = true }
+                PlusRow(Icons.Outlined.FolderOpen, "工作区", "打开免 Root 工作区与 Ubuntu 配置", Ink, Sub, null) {
+                    showPlusCard = false; onNavigateToWorkspace()
+                }
                 PlusRow(Icons.Outlined.Public, "联网搜索", if (webSearchOn) "已开启" else "已关闭(不打开就不能联网获取信息)", Ink, Sub, webSearchOn) {
                     webSearchOn = !webSearchOn; onSetWebSearchEnabled(webSearchOn)
                 }
@@ -709,8 +790,8 @@ fun ChatScreen(
                 .align(Alignment.CenterHorizontally)
                 .padding(horizontal = 12.dp)
                 .padding(bottom = 12.dp)
-                .border(1.dp, Border, RoundedCornerShape(8.dp))
-                .background(xc.bgElevated, RoundedCornerShape(8.dp))
+                .border(1.dp, Border, RoundedCornerShape(18.dp))
+                .background(xc.bgElevated, RoundedCornerShape(18.dp))
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
                 // Row 1: text field
@@ -733,9 +814,32 @@ fun ChatScreen(
                         unfocusedTextColor = Ink,
                         disabledTextColor = Faint
                     ),
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 16.sp, lineHeight = 23.sp),
                     keyboardOptions = KeyboardOptions(imeAction = if (enterToSend) ImeAction.Send else ImeAction.Default),
                     keyboardActions = KeyboardActions(onSend = { submitInput() }),
+                    trailingIcon = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ContextRing(usage = contextUsage, onClick = { showStatsPopup = !showStatsPopup })
+                            Spacer(Modifier.width(6.dp))
+                            val streaming = chatState.isStreaming.value
+                            val hasText = chatState.input.value.isNotBlank()
+                            IconButton(
+                                onClick = {
+                                    if (streaming && !hasText) {
+                                        if (isGoalSession && goalRunning) onStopGoal() else chatState.stop()
+                                    } else submitInput()
+                                },
+                                enabled = hasText || streaming,
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Icon(
+                                    if (streaming && !hasText) Icons.Outlined.Stop else Icons.Outlined.Send,
+                                    contentDescription = if (streaming && !hasText) "停止生成" else "发送消息",
+                                    tint = if (hasText || streaming) Ink else Faint
+                                )
+                            }
+                        }
+                    },
                     placeholder = {
                         Text(
                             when {
@@ -743,7 +847,7 @@ fun ChatScreen(
                                 isGoalSession && !goalRunning -> "输入目标,让 HSUCODE 自主完成…"
                                 else -> "输入消息…"
                             },
-                            color = Faint, fontSize = 14.sp
+                            color = Sub, fontSize = 16.sp
                         )
                     }
                 )
@@ -816,121 +920,91 @@ fun ChatScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 左组:[+] 附件 + 模式芯片(点击弹卡:普通聊天 / 计划模式 / 协作模式,各选 正常·完全访问)
-                    // weight(fill=false):内容短时按需占位,内容长时【可被压缩】——
-                    // 否则「◆ 协作·完全访问」+ 长模型名会把右侧的发送键挤出屏幕(用户实测反馈)。
+                    // RikkaHub 风格的下层工具栏:供应商头像、模式和轻量动作集中在这里;
+                    // 上下文与发送已经放到输入框右侧,避免底部操作重复和横向拥挤。
                     Row(
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // [+] icon → attach file
-                        HsuIcon(icon = Icons.Outlined.Add, size = 18.dp, tint = if (showPlusCard) Green else Sub,
-                            onClick = { showPlusCard = !showPlusCard })
-
+                        ProviderLogo(
+                            supplierId = supplierId,
+                            providerName = providerName.ifBlank { assistantName },
+                            logoSize = 48.dp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        HsuIcon(
+                            icon = Icons.Outlined.Add,
+                            size = 19.dp,
+                            tint = if (showPlusCard) Green else Sub,
+                            contentDescription = "附件与工具",
+                            onClick = { showPlusCard = !showPlusCard }
+                        )
                         val isFull = permissionMode == com.hsucode.security.PermissionMode.ALLOW_ALL
-                        val accessSuffix = if (isFull) "·完全访问" else "·正常"
-                        val (modeLabel, modeColor) = when {
-                            collabMode -> ("协作$accessSuffix") to (if (isFull) Red else Green)
-                            permissionMode == com.hsucode.security.PermissionMode.PLAN -> "计划" to Green
-                            isFull -> "完全访问" to Red
-                            else -> "聊天" to Sub
+                        val accessSuffix = if (isFull) " · 完全访问" else " · 正常"
+                        val modeLabel = when {
+                            collabMode -> "协作$accessSuffix"
+                            permissionMode == com.hsucode.security.PermissionMode.PLAN -> "计划"
+                            isFull -> "完全访问"
+                            else -> "聊天"
                         }
                         Text(
                             modeLabel,
                             fontSize = 12.sp,
-                            fontFamily = JetBrainsMono,
-                            color = modeColor,
+                            color = if (isFull) xc.red else if (collabMode || permissionMode == com.hsucode.security.PermissionMode.PLAN) xc.green else Sub,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { showModeCard = !showModeCard }
+                                .padding(horizontal = 4.dp, vertical = 14.dp)
+                        )
+                        HsuIcon(
+                            icon = Icons.Outlined.AutoAwesome,
+                            size = 19.dp,
+                            tint = if (expandingPrompt || chatState.input.value.isBlank()) xc.faint else xc.green,
+                            contentDescription = "优化任务描述",
+                            onClick = {
+                                val draft = chatState.input.value
+                                if (!expandingPrompt && draft.isNotBlank()) {
+                                    expandingPrompt = true
+                                    scope.launch {
+                                        val a = context.applicationContext as HsucodeApplication
+                                        val r = PromptExpander.expand(a.database, a.keystore, PromptExpander.Kind.TASK, draft)
+                                        r.onSuccess { chatState.input.value = it }
+                                        r.onFailure { Toast.makeText(context, "扩展失败:${it.message}", Toast.LENGTH_SHORT).show() }
+                                        expandingPrompt = false
+                                    }
+                                }
+                            }
+                        )
+                        HsuIcon(
+                            icon = Icons.Outlined.MicNone,
+                            size = 19.dp,
+                            tint = if (voiceState == VoiceInputHelper.State.LISTENING) xc.red else xc.sub,
+                            contentDescription = if (voiceState == VoiceInputHelper.State.LISTENING) "停止语音输入" else "语音输入",
+                            onClick = {
+                                if (voiceState == VoiceInputHelper.State.LISTENING) {
+                                    voiceInputHelper?.stopListening()
+                                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                    voiceInputHelper?.startListening()
+                                } else {
+                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            }
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "$modelDisplayName · $effortLabel",
+                            fontSize = 12.sp,
+                            color = Sub,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
-                                    showModeCard = !showModeCard
+                                    showMainMenu = !showMainMenu
+                                    showEffortMenu = false
                                 }
-                                .heightIn(min = 48.dp)
-                                .padding(horizontal = 4.dp, vertical = 15.dp)
+                                .padding(horizontal = 8.dp, vertical = 14.dp)
                         )
-                    }
-
-                    // Model·Effort capsule —— 同样可压缩 + 省略号,长模型名(如 agnes-2.0-flash)不再顶掉发送键。
-                    // 左右留一点间距,避免与模式标签、圆环贴死(用户截图里「完全访问」和模型名挤成一团)。
-                    Text(
-                        "$modelDisplayName · $effortLabel",
-                        fontSize = 12.sp,
-                        fontFamily = JetBrainsMono,
-                        color = Sub,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f, fill = false)
-                            .heightIn(min = 48.dp)
-                            .padding(horizontal = 8.dp, vertical = 15.dp)
-                            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
-                                showMainMenu = !showMainMenu
-                                showEffortMenu = false
-                            }
-                    )
-
-                    // 右侧:上下文圆环 + 发送/停止键。
-                    // 【不加 weight】——Row 会先满足无 weight 子项的固有宽度,再把剩余空间分给带 weight 的,
-                    // 因此发送键永远优先保留位置,左侧模式/模型名再长也只会被省略,不会把它挤出屏幕。
-                    Row(
-                        modifier = Modifier.wrapContentWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                    // 扩展提示词:把「做个记账 APP」这种一句话想周全再发。
-                    // 一句话的需求换回来的一定是泛泛而谈的回答,补齐场景/约束/验收之后
-                    // 才谈得上有用 —— 但没人愿意每次手打三百字,这个按钮就是补这一段。
-                    HsuIcon(
-                        icon = Icons.Outlined.AutoAwesome,
-                        size = 20.dp,
-                        tint = if (expandingPrompt || chatState.input.value.isBlank()) xc.faint else xc.green,
-                        contentDescription = "优化任务描述",
-                        onClick = {
-                            val draft = chatState.input.value
-                            if (!expandingPrompt && draft.isNotBlank()) {
-                                expandingPrompt = true
-                                scope.launch {
-                                    val a = context.applicationContext as HsucodeApplication
-                                    val r = PromptExpander.expand(a.database, a.keystore, PromptExpander.Kind.TASK, draft)
-                                    r.onSuccess { chatState.input.value = it }
-                                    r.onFailure { Toast.makeText(context, "扩展失败:${it.message}", Toast.LENGTH_SHORT).show() }
-                                    expandingPrompt = false
-                                }
-                            }
-                        }
-                    )
-                    // 上下文圆环:随占用绿→蓝→黄→红渐变填充;点击弹出统计卡片。
-                    ContextRing(
-                        usage = contextUsage,
-                        onClick = { showStatsPopup = !showStatsPopup }
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    androidx.compose.animation.AnimatedContent(
-                        targetState = chatState.isStreaming.value,
-                        transitionSpec = {
-                            (scaleIn(tween(180)) + fadeIn(tween(180))) togetherWith
-                                (scaleOut(tween(140)) + fadeOut(tween(140)))
-                        },
-                        label = "sendStopMorph"
-                    ) { streaming ->
-                        val hasText = chatState.input.value.isNotBlank()
-                        IconButton(
-                            onClick = {
-                                if (streaming && !hasText) {
-                                    if (isGoalSession && goalRunning) onStopGoal() else chatState.stop()
-                                } else {
-                                    submitInput()
-                                }
-                            },
-                            enabled = hasText || streaming
-                        ) {
-                            Icon(
-                                if (streaming && !hasText) Icons.Outlined.Stop else Icons.Outlined.Send,
-                                contentDescription = if (streaming && !hasText) "停止" else "发送",
-                                tint = if (hasText || streaming) Ink else Faint
-                            )
-                        }
-                    }
                     }
                 }
             }
@@ -1164,6 +1238,41 @@ fun ChatScreen(
             dismissButton = { TextButton(onClick = { pendingModelIdx = null }) { Text("取消", fontFamily = JetBrainsMono, color = Sub) } },
             containerColor = Bg
         )
+    }
+}
+
+@Composable
+private fun WorkspaceQuickStrip(
+    linuxReady: Boolean,
+    onOpenTerminal: () -> Unit,
+    onOpenWorkspace: () -> Unit
+) {
+    val xc = LocalHsuColors.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .heightIn(min = 52.dp)
+            .background(xc.bgElevated, RoundedCornerShape(10.dp))
+            .border(1.dp, xc.border, RoundedCornerShape(10.dp))
+            .padding(start = 12.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(if (linuxReady) xc.green else xc.yellow))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(if (linuxReady) "Ubuntu 工作区" else "免 Root 工作区", style = MaterialTheme.typography.labelLarge, color = xc.ink)
+            Text(
+                if (linuxReady) WorkspaceRuntime.detail() else "Android Shell · 安装 Ubuntu 后可使用 apt 与开发工具",
+                style = MaterialTheme.typography.bodySmall, color = xc.sub, maxLines = 1
+            )
+        }
+        IconButton(onClick = onOpenTerminal, modifier = Modifier.size(48.dp)) {
+            Icon(Icons.Outlined.Terminal, contentDescription = "打开终端", tint = xc.green)
+        }
+        IconButton(onClick = onOpenWorkspace, modifier = Modifier.size(48.dp)) {
+            Icon(Icons.Outlined.Tune, contentDescription = "配置工作区", tint = xc.sub)
+        }
     }
 }
 
@@ -1692,6 +1801,57 @@ private fun AccessChip(label: String, active: Boolean, activeColor: Color, xc: H
             selectedLabelColor = activeColor
         )
     )
+}
+
+/** Calm empty state inspired by RikkaHub: useful actions appear before the first message. */
+@Composable
+private fun WelcomePanel(
+    currentModel: String,
+    onPrompt: (String) -> Unit
+) {
+    val colors = LocalHsuColors.current
+    val prompts = listOf(
+        "分析一个代码问题",
+        "整理当前项目结构",
+        "检查工作区状态",
+        "帮我制定执行计划"
+    )
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.Start
+    ) {
+        Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = colors.green, modifier = Modifier.size(30.dp))
+        Spacer(Modifier.height(16.dp))
+        Text("你好，今天想做什么？", style = MaterialTheme.typography.titleLarge, color = colors.ink)
+        Text(
+            currentModel.ifBlank { "尚未选择模型" },
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.sub,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+        Spacer(Modifier.height(22.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            prompts.take(2).forEach { prompt ->
+                AssistChip(
+                    onClick = { onPrompt(prompt) },
+                    label = { Text(prompt, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            prompts.drop(2).forEach { prompt ->
+                AssistChip(
+                    onClick = { onPrompt(prompt) },
+                    label = { Text(prompt, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
 }
 
 /** Consolidated execution state for goal progress, live plan, and agent status. */

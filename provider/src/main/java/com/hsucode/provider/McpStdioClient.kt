@@ -22,7 +22,9 @@ class McpStdioClient(
     private val command: String,
     private val args: List<String>,
     private val env: Map<String, String>,
-    private val runAsRoot: Boolean = false
+    private val runAsRoot: Boolean = false,
+    /** Optional launcher for an isolated runtime such as HSUCODE's PRoot Ubuntu. */
+    private val processFactory: (() -> Process)? = null
 ) : McpTransport {
 
     companion object {
@@ -47,11 +49,11 @@ class McpStdioClient(
         } else {
             listOf(command) + args
         }
-        val pb = ProcessBuilder(full)
-        val e = pb.environment()
-        for ((k, v) in env) e[k] = v
-        pb.redirectErrorStream(false)
-        val p = pb.start()
+        val p = processFactory?.invoke() ?: ProcessBuilder(full).apply {
+            val e = environment()
+            for ((k, v) in env) e[k] = v
+            redirectErrorStream(false)
+        }.start()
         process = p
         writer = p.outputStream.bufferedWriter()
         reader = p.inputStream.bufferedReader()

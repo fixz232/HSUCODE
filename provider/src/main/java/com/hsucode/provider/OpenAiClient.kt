@@ -3,6 +3,7 @@ package com.hsucode.provider
 import android.util.Base64
 import android.util.Log
 import com.hsucode.data.AppDatabase
+import com.hsucode.data.ProviderConfigEntity
 import com.hsucode.security.KeystoreProvider
 import com.hsucode.provider.HttpCacheProvider
 import kotlinx.coroutines.Dispatchers
@@ -29,8 +30,27 @@ class OpenAiClient(
     private val keystore: KeystoreProvider,
     private val functionKey: String? = null
 ) {
+    data class ProviderTestResult(
+        val ok: Boolean,
+        val latencyMs: Long,
+        val statusCode: Int,
+        val message: String,
+        val modelListStatus: String
+    )
+
+    data class ProviderBalance(val amount: Double, val currency: String = "", val checkedAt: Long = System.currentTimeMillis())
+    data class ModelCapabilityProbe(
+        val text: Boolean,
+        val toolCall: Boolean,
+        val vision: Boolean,
+        val audio: Boolean,
+        val reasoning: Boolean,
+        val details: String
+    )
+
     companion object {
         private const val TAG = "HsucodeProvider"
+        private const val ONE_PIXEL_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -63,7 +83,8 @@ class OpenAiClient(
         val supportsVision: Boolean = false,
         val supportsAudio: Boolean = false,
         val supportsVideo: Boolean = false,
-        val supportsToolCall: Boolean = true
+        val supportsToolCall: Boolean = true,
+        val configId: Long = 0L
     )
 
     /** gap-08:把 provider 配置里的 extra_headers(JSON 对象)verbatim 注入请求(可覆盖默认头)。 */
@@ -127,28 +148,161 @@ class OpenAiClient(
                 if (id > 0) cfgDao.getById(id) else null
             } else null
 
-            val active = assigned ?: cfgDao.getActive()
+            val route = decodeRoute(database.settingDao().get("model_routing_rules").orEmpty())
+            val routeId = when {
+                assigned != null -> 0L
+                functionKey == "compact" || functionKey == "review" -> route.lowCostConfigId
+                functionKey == "describe_image" -> route.visionConfigId
+                functionKey == "subagent" || functionKey == "wolfpack" -> route.longContextConfigId
+                else -> route.primaryConfigId
+            }
+            val routed = if (routeId > 0) cfgDao.getById(routeId) else null
+            val active = assigned ?: routed ?: cfgDao.getActive()
                 ?: return Result.failure(IllegalStateException("未找到活跃配置，请先在供应商配置中创建"))
+            val routeModel = when {
+                assigned != null -> modelOverride
+                routeId == route.primaryConfigId -> route.primaryModel
+                routeId == route.lowCostConfigId -> route.lowCostModel
+                routeId == route.visionConfigId -> route.visionModel
+                routeId == route.longContextConfigId -> route.longContextModel
+                else -> ""
+            }
             val baseUrl = active.baseUrl.ifBlank {
                 return Result.failure(IllegalStateException("base_url 未配置"))
             }
-            val model = modelOverride.ifBlank { active.model }.ifBlank {
+            val model = routeModel.ifBlank { modelOverride }.ifBlank { active.model }.ifBlank {
                 return Result.failure(IllegalStateException("model 未配置"))
             }
-            val apiKey = keystore.decrypt(Base64.decode(active.apiKeyEnc, Base64.NO_WRAP))
-            Result.success(ResolvedConfig(
-                baseUrl.trimEnd('/'), model, apiKey, active.apiPathType,
-                extraHeadersJson = active.extraHeadersJson,
-                contextWindow = active.contextWindow,
-                autoCompactThresholdPercent = active.autoCompactThresholdPercent,
-                supportsVision = active.supportsVision,
-                supportsAudio = active.supportsAudio,
-                supportsVideo = active.supportsVideo,
-                supportsToolCall = active.supportsToolCall
-            ))
+            Result.success(resolveEntity(active, model))
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    private fun resolveEntity(config: ProviderConfigEntity, model: String = config.model): ResolvedConfig {
+        val apiKey = if (config.apiKeyEnc.isBlank()) "" else keystore.decrypt(Base64.decode(config.apiKeyEnc, Base64.NO_WRAP))
+        return ResolvedConfig(
+                config.baseUrl.trimEnd('/'), model, apiKey, config.apiPathType,
+                extraHeadersJson = config.extraHeadersJson,
+                contextWindow = config.contextWindow,
+                autoCompactThresholdPercent = config.autoCompactThresholdPercent,
+                supportsVision = config.supportsVision,
+                supportsAudio = config.supportsAudio,
+                supportsVideo = config.supportsVideo,
+                supportsToolCall = config.supportsToolCall,
+                configId = config.id
+            )
+    }
+
+    private data class RouteConfig(
+        val primaryConfigId: Long = 0L,
+        val primaryModel: String = "",
+        val fallbackConfigId: Long = 0L,
+        val fallbackModel: String = "",
+        val lowCostConfigId: Long = 0L,
+        val lowCostModel: String = "",
+        val longContextConfigId: Long = 0L,
+        val longContextModel: String = "",
+        val visionConfigId: Long = 0L,
+        val visionModel: String = "",
+        val retryOnRateLimit: Boolean = true,
+        val retryOnServerError: Boolean = true,
+        val retryOnModelUnavailable: Boolean = true,
+        val retryOnCapabilityMismatch: Boolean = true
+    )
+
+    private fun decodeRoute(raw: String): RouteConfig = runCatching {
+        val obj = JSONObject(raw)
+        RouteConfig(
+            primaryConfigId = obj.optLong("primaryConfigId"),
+            primaryModel = obj.optString("primaryModel"),
+            fallbackConfigId = obj.optLong("fallbackConfigId"),
+            fallbackModel = obj.optString("fallbackModel"),
+            lowCostConfigId = obj.optLong("lowCostConfigId"),
+            lowCostModel = obj.optString("lowCostModel"),
+            longContextConfigId = obj.optLong("longContextConfigId"),
+            longContextModel = obj.optString("longContextModel"),
+            visionConfigId = obj.optLong("visionConfigId"),
+            visionModel = obj.optString("visionModel"),
+            retryOnRateLimit = obj.optBoolean("retryOnRateLimit", true),
+            retryOnServerError = obj.optBoolean("retryOnServerError", true),
+            retryOnModelUnavailable = obj.optBoolean("retryOnModelUnavailable", true),
+            retryOnCapabilityMismatch = obj.optBoolean("retryOnCapabilityMismatch", true)
+        )
+    }.getOrDefault(RouteConfig())
+
+    private fun isRetryable(error: ApiError, route: RouteConfig): Boolean {
+        val code = when (error) {
+            is ApiError.RequestError -> error.code
+            is ApiError.ServerError -> error.code
+            else -> 0
+        }
+        if (code == 408 || code == 409 || code == 429) return route.retryOnRateLimit
+        if (code in 500..599) return route.retryOnServerError
+        val text = error.message.orEmpty().lowercase()
+        return route.retryOnModelUnavailable && listOf("model not found", "model_not_found", "unknown model", "不存在").any(text::contains)
+    }
+
+    private suspend fun fallbackConfig(primary: ResolvedConfig): Pair<ResolvedConfig, RouteConfig>? {
+        if (functionKey != null) return null
+        val route = decodeRoute(database.settingDao().get("model_routing_rules").orEmpty())
+        if (route.fallbackConfigId <= 0 || route.fallbackConfigId == primary.configId) return null
+        val config = database.providerConfigDao().getById(route.fallbackConfigId) ?: return null
+        return runCatching { resolveEntity(config, route.fallbackModel.ifBlank { config.model }) to route }.getOrNull()
+    }
+
+    /** Main agent request with one explicit, non-duplicating fallback attempt. */
+    suspend fun agentStream(
+        messages: List<JSONObject>,
+        tools: JSONArray,
+        temperature: Float = 1.0f,
+        thinkingEnabled: Boolean = false,
+        thinkingLevel: Int = 2,
+        maxTokens: Int? = null,
+        topP: Float? = null,
+        responseFormat: JSONObject? = null,
+        onToken: (String) -> Unit,
+        onReasoning: (String) -> Unit = {},
+        onComplete: (AgentStreamResult) -> Unit,
+        onError: suspend (ApiError) -> Unit
+    ) {
+        val primary = resolveConfig().getOrElse {
+            onError(ApiError.from(it)); return
+        }
+        val fallback = fallbackConfig(primary)
+        val route = fallback?.second ?: RouteConfig()
+        val fallbackConfigValue = fallback?.first
+        val needsVision = messages.any { message ->
+            (message.opt("content") as? JSONArray)?.let { content ->
+                (0 until content.length()).any { content.optJSONObject(it)?.optString("type") == "image_url" }
+            } == true
+        }
+        val capabilityMismatch = (tools.length() > 0 && !primary.supportsToolCall) || (needsVision && !primary.supportsVision)
+        val ordered = if (capabilityMismatch && route.retryOnCapabilityMismatch && fallbackConfigValue != null &&
+            (tools.length() == 0 || fallbackConfigValue.supportsToolCall) && (!needsVision || fallbackConfigValue.supportsVision)
+        ) listOf(fallbackConfigValue, primary) else listOfNotNull(primary, fallbackConfigValue)
+
+        for ((index, config) in ordered.withIndex()) {
+            var emitted = false
+            var completed = false
+            var lastError: ApiError? = null
+            agentStreamOnce(
+                messages, tools, temperature, thinkingEnabled, thinkingLevel, maxTokens, topP, responseFormat,
+                onToken = { emitted = true; onToken(it) },
+                onReasoning = onReasoning,
+                onComplete = { completed = true; onComplete(it) },
+                onError = { lastError = it },
+                forcedConfig = config
+            )
+            if (completed) return
+            if (lastError == null) {
+                onError(ApiError.UnknownError("模型请求未返回结果")); return
+            }
+            if (index < ordered.lastIndex && !emitted && isRetryable(lastError!!, route)) continue
+            onError(lastError!!)
+            return
+        }
+        onError(ApiError.UnknownError("没有可用的模型路由"))
     }
 
     // -- model list ------------------------------------------------------------
@@ -158,14 +312,22 @@ class OpenAiClient(
      * Takes raw [baseUrl] and [apiKey] directly — no Room/Keystore dependency,
      * so it can be called before saving config.
      */
-    suspend fun listModels(baseUrl: String, apiKey: String): Result<List<String>> = withContext(Dispatchers.IO) {
+    suspend fun listModels(
+        baseUrl: String,
+        apiKey: String,
+        apiPathType: String = "openai",
+        extraHeadersJson: String = ""
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
         try {
+            if (apiPathType == "anthropic") return@withContext Result.success(emptyList())
             // 与 chatEndpoint 同一套规则:base_url 自带版本段(/v1、/v4…)时只接 /models。
             val b = trimBase(baseUrl)
             val url = if (hasVersionSegment(b)) "$b/models" else "$b/v1/models"
             val request = Request.Builder()
                 .url(url)
-                .addHeader("Authorization", "Bearer $apiKey")
+                .apply { if (apiKey.isNotBlank()) addHeader("Authorization", "Bearer $apiKey") }
+                .addHeader("Accept", "application/json")
+                .applyExtraHeaders(extraHeadersJson)
                 .get()
                 .build()
 
@@ -198,6 +360,148 @@ class OpenAiClient(
         }
     }
 
+    /** Real, non-streaming smoke test for a saved provider. It never logs the key or response body. */
+    suspend fun testConfig(config: ProviderConfigEntity): ProviderTestResult = withContext(Dispatchers.IO) {
+        val started = System.nanoTime()
+        val key = runCatching {
+            if (config.apiKeyEnc.isBlank()) ""
+            else keystore.decrypt(Base64.decode(config.apiKeyEnc, Base64.NO_WRAP))
+        }.getOrElse { return@withContext ProviderTestResult(false, elapsedMs(started), 0, "API Key 无法解密", "未测试") }
+        if (config.baseUrl.isBlank() || config.model.isBlank()) {
+            return@withContext ProviderTestResult(false, elapsedMs(started), 0, "端点或模型 ID 为空", "未测试")
+        }
+
+        val body = when (config.apiPathType) {
+            "anthropic" -> JSONObject().apply {
+                put("model", config.model); put("max_tokens", 8)
+                put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "ping")))
+                put("stream", false)
+            }
+            "responses" -> JSONObject().apply { put("model", config.model); put("input", "ping"); put("stream", false) }
+            else -> JSONObject().apply {
+                put("model", config.model)
+                put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "ping")))
+                put("stream", false)
+            }
+        }
+        val request = Request.Builder()
+            .url(chatEndpoint(config.baseUrl, config.apiPathType))
+            .apply {
+                if (config.apiPathType == "anthropic") {
+                    header("x-api-key", key); header("anthropic-version", "2023-06-01")
+                } else if (key.isNotBlank()) header("Authorization", "Bearer $key")
+                header("Content-Type", "application/json")
+            }
+            .applyExtraHeaders(config.extraHeadersJson)
+            .post(body.toString().toRequestBody(JSON))
+            .build()
+        val response = runCatching { httpClient.newCall(request).execute() }.getOrElse {
+            return@withContext ProviderTestResult(false, elapsedMs(started), 0, ApiError.from(it).message.orEmpty(), "未测试")
+        }
+        response.use { res ->
+            val responseBody = res.body?.string().orEmpty()
+            if (!res.isSuccessful) {
+                val detail = runCatching { JSONObject(responseBody).optJSONObject("error")?.optString("message") }.getOrNull()
+                    ?: responseBody.take(160)
+                return@withContext ProviderTestResult(false, elapsedMs(started), res.code, detail.ifBlank { "HTTP ${res.code}" }, "失败")
+            }
+        }
+        val listStatus = if (config.apiPathType == "anthropic") {
+            "该协议不提供通用模型列表"
+        } else {
+            listModels(config.baseUrl, key, config.apiPathType, config.extraHeadersJson).fold(
+                onSuccess = { if (it.isEmpty()) "接口可用但未返回模型" else "已发现 ${it.size} 个模型" },
+                onFailure = { "列表失败: ${it.message?.take(80).orEmpty()}" }
+            )
+        }
+        ProviderTestResult(true, elapsedMs(started), 200, "最小请求成功", listStatus)
+    }
+
+    /** Best-effort balance lookup for OpenAI-compatible billing endpoints. */
+    suspend fun fetchBalance(config: ProviderConfigEntity): Result<ProviderBalance> = withContext(Dispatchers.IO) {
+        runCatching {
+            val key = if (config.apiKeyEnc.isBlank()) "" else keystore.decrypt(Base64.decode(config.apiKeyEnc, Base64.NO_WRAP))
+            require(key.isNotBlank()) { "API Key 为空，无法查询余额" }
+            val base = trimBase(config.baseUrl)
+            val candidates = listOf(
+                "$base/dashboard/billing/credit_grants",
+                if (hasVersionSegment(base)) "$base/billing/credit_grants" else "$base/v1/dashboard/billing/credit_grants"
+            ).distinct()
+            var lastError: Throwable? = null
+            for (url in candidates) {
+                try {
+                    val obj = httpClient.newCall(Request.Builder().url(url)
+                        .header("Authorization", "Bearer $key")
+                        .applyExtraHeaders(config.extraHeadersJson).get().build()).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            lastError = IOException("HTTP ${response.code}")
+                            return@use null
+                        }
+                        JSONObject(response.body?.string().orEmpty())
+                    } ?: continue
+                    val amount = sequenceOf(
+                        obj.optDouble("total_available", Double.NaN),
+                        obj.optDouble("balance", Double.NaN),
+                        obj.optDouble("available", Double.NaN),
+                        obj.optJSONObject("data")?.optDouble("balance", Double.NaN) ?: Double.NaN
+                    ).firstOrNull { !it.isNaN() } ?: error("响应中没有余额字段")
+                    return@runCatching ProviderBalance(amount, obj.optString("currency", "USD"))
+                } catch (e: Exception) { lastError = e }
+            }
+            throw (lastError ?: IOException("供应商未提供余额接口"))
+        }
+    }
+
+    /** Sends minimal text/tool/vision requests and records which capabilities the model accepts. */
+    suspend fun probeModel(config: ProviderConfigEntity): Result<ModelCapabilityProbe> = withContext(Dispatchers.IO) {
+        runCatching {
+            val text = testConfig(config).ok
+            val tool = text && probeOptional(config, "tool")
+            val vision = text && probeOptional(config, "vision")
+            val id = config.model.lowercase()
+            val reasoning = id.contains("reason") || id.contains("thinking") || id.contains("-r1") || id.startsWith("o1") || id.startsWith("o3")
+            ModelCapabilityProbe(text, tool, vision, false, reasoning, "文本、ToolCall、视觉均为真实最小请求；推理依据模型元数据")
+        }
+    }
+
+    private fun probeOptional(config: ProviderConfigEntity, mode: String): Boolean {
+        val key = if (config.apiKeyEnc.isBlank()) "" else runCatching { keystore.decrypt(Base64.decode(config.apiKeyEnc, Base64.NO_WRAP)) }.getOrDefault("")
+        val body = when (config.apiPathType) {
+            "anthropic" -> JSONObject().apply {
+                put("model", config.model); put("max_tokens", 1)
+                put("messages", JSONArray().put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", if (mode == "vision") JSONArray().put(JSONObject().put("type", "text").put("text", "ping")).put(JSONObject().put("type", "image").put("source", JSONObject().put("type", "base64").put("media_type", "image/png").put("data", ONE_PIXEL_PNG_BASE64))) else "ping")
+                }))
+                if (mode == "tool") put("tools", JSONArray().put(JSONObject().put("name", "hsucode_probe").put("description", "probe").put("input_schema", JSONObject().put("type", "object"))))
+            }
+            "responses" -> JSONObject().apply {
+                put("model", config.model)
+                put("input", if (mode == "vision") JSONArray().put(JSONObject().put("role", "user").put("content", JSONArray().put(JSONObject().put("type", "input_text").put("text", "ping")).put(JSONObject().put("type", "input_image").put("image_url", "data:image/png;base64,$ONE_PIXEL_PNG_BASE64")))) else "ping")
+                put("max_output_tokens", 1)
+                if (mode == "tool") put("tools", JSONArray().put(JSONObject().put("type", "function").put("name", "hsucode_probe").put("parameters", JSONObject().put("type", "object"))))
+            }
+            else -> JSONObject().apply {
+                put("model", config.model)
+                put("messages", JSONArray().put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", if (mode == "vision") JSONArray().put(JSONObject().put("type", "text").put("text", "ping")).put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/png;base64,$ONE_PIXEL_PNG_BASE64"))) else "ping")
+                }))
+                if (mode == "tool") put("tools", JSONArray().put(JSONObject().put("type", "function").put("function", JSONObject().put("name", "hsucode_probe").put("description", "probe").put("parameters", JSONObject().put("type", "object")))))
+                put("max_tokens", 1)
+                put("stream", false)
+            }
+        }
+        val request = Request.Builder().url(chatEndpoint(config.baseUrl, config.apiPathType)).apply {
+            if (config.apiPathType == "anthropic") { header("x-api-key", key); header("anthropic-version", "2023-06-01") }
+            else if (key.isNotBlank()) header("Authorization", "Bearer $key")
+            header("Content-Type", "application/json")
+        }.applyExtraHeaders(config.extraHeadersJson).post(body.toString().toRequestBody(JSON)).build()
+        return runCatching { httpClient.newCall(request).execute().use { it.isSuccessful } }.getOrDefault(false)
+    }
+
+    private fun elapsedMs(started: Long): Long = (System.nanoTime() - started) / 1_000_000L
+
     // -- non-streaming --------------------------------------------------------
 
     /**
@@ -208,25 +512,43 @@ class OpenAiClient(
         try {
             val cfg = resolveConfig().getOrElse { return@withContext Result.failure(it) }
 
-            val body = JSONObject().apply {
-                put("model", cfg.model)
-                put("messages", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "system")
-                        put("content", "You are a helpful assistant.")
+            val body = when (cfg.apiPathType) {
+                "anthropic" -> JSONObject().apply {
+                    put("model", cfg.model); put("max_tokens", 1024)
+                    put("messages", JSONArray().put(JSONObject().apply {
+                        put("role", "user"); put("content", userMessage)
+                    }))
+                    put("stream", false)
+                }
+                "responses" -> JSONObject().apply {
+                    put("model", cfg.model); put("input", userMessage); put("stream", false)
+                }
+                else -> JSONObject().apply {
+                    put("model", cfg.model)
+                    put("messages", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system"); put("content", "You are a helpful assistant.")
+                        })
+                        put(JSONObject().apply {
+                            put("role", "user"); put("content", userMessage)
+                        })
                     })
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("content", userMessage)
-                    })
-                })
-                put("stream", false)
+                    put("stream", false)
+                }
             }
 
             val request = Request.Builder()
                 .url(chatEndpoint(cfg.baseUrl, cfg.apiPathType))
-                .addHeader("Authorization", "Bearer ${cfg.apiKey}")
+                .apply {
+                    if (cfg.apiPathType == "anthropic") {
+                        addHeader("x-api-key", cfg.apiKey)
+                        addHeader("anthropic-version", "2023-06-01")
+                    } else if (cfg.apiKey.isNotBlank()) {
+                        addHeader("Authorization", "Bearer ${cfg.apiKey}")
+                    }
+                }
                 .addHeader("Content-Type", "application/json")
+                .applyExtraHeaders(cfg.extraHeadersJson)
                 .post(body.toString().toRequestBody(JSON))
                 .build()
 
@@ -249,11 +571,16 @@ class OpenAiClient(
                 val u = json.getJSONObject("usage")
                 Log.i("CacheUsage", "prompt_tokens=${u.optInt("prompt_tokens", -1)}, cache_hit=${u.optInt("prompt_cache_hit_tokens", -1)}, cache_miss=${u.optInt("prompt_cache_miss_tokens", -1)}")
             }
-            val content = json
-                .getJSONArray("choices")
-                .getJSONObject(0)
-                .getJSONObject("message")
-                .getString("content")
+            val content = when (cfg.apiPathType) {
+                "anthropic" -> json.optJSONArray("content")?.optJSONObject(0)?.optString("text").orEmpty()
+                "responses" -> json.optString("output_text").ifBlank {
+                    json.optJSONArray("output")?.optJSONObject(0)?.optJSONArray("content")
+                        ?.optJSONObject(0)?.optString("text").orEmpty()
+                }
+                else -> json.getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").getString("content")
+            }
+            if (content.isBlank()) return@withContext Result.failure(ApiError.ParseError())
 
             Log.i(TAG, "✓ Response: ${content.take(200)}")
             Result.success(content)
@@ -370,7 +697,7 @@ class OpenAiClient(
      * @param onComplete Called when stream finishes, with accumulated content and any tool_calls.
      * @param onError   Called on any failure.
      */
-    suspend fun agentStream(
+    private suspend fun agentStreamOnce(
         messages: List<JSONObject>,
         tools: JSONArray,
         temperature: Float = 1.0f,
@@ -382,12 +709,13 @@ class OpenAiClient(
         onToken: (String) -> Unit,
         onReasoning: (String) -> Unit = {},
         onComplete: (AgentStreamResult) -> Unit,
-        onError: suspend (ApiError) -> Unit
+        onError: suspend (ApiError) -> Unit,
+        forcedConfig: ResolvedConfig? = null
     ) {
         withContext(Dispatchers.IO) {
             var response: okhttp3.Response? = null
             try {
-                val cfg = resolveConfig().getOrElse {
+                val cfg = (forcedConfig?.let { Result.success(it) } ?: resolveConfig()).getOrElse {
                     onError(ApiError.from(it))
                     return@withContext
                 }

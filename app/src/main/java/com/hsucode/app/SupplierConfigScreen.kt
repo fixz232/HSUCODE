@@ -8,13 +8,19 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -58,36 +64,11 @@ private data class Supplier(
     val apiPathType: String = "openai"
 )
 
-private val knownSuppliers = listOf(
-    Supplier("deepseek", "DeepSeek", "https://api.deepseek.com", "deepseek-chat",
-        listOf("deepseek-chat", "deepseek-reasoner")),
-    Supplier("openai", "OpenAI", "https://api.openai.com", "gpt-4o-mini",
-        listOf("gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo", "o1-mini", "o3-mini")),
-    Supplier("siliconflow", "硅基流动", "https://api.siliconflow.cn", "deepseek-ai/DeepSeek-V3",
-        listOf("deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-7B-Instruct")),
-    Supplier("groq", "Groq", "https://api.groq.com/openai", "llama-3.3-70b-versatile",
-        listOf("llama-3.3-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it")),
-    Supplier("zhipu", "智谱AI", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash",
-        listOf("glm-4", "glm-4-flash", "glm-4-plus")),
-    Supplier("dashscope", "通义千问", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-turbo",
-        listOf("qwen-turbo", "qwen-plus", "qwen-max")),
-    Supplier("moonshot", "Moonshot", "https://api.moonshot.cn", "moonshot-v1-8k",
-        listOf("moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k")),
-    Supplier("baidu", "百度千帆", "https://qianfan.baidubce.com/v2", "ernie-3.5-8k",
-        listOf("ernie-3.5-8k", "ernie-4.0-8k", "ernie-speed-8k")),
-    Supplier("ollama", "Ollama (本地)", "http://localhost:11434", "",
-        listOf("llama3", "qwen2.5", "deepseek-r1", "mistral")),
-    Supplier("anthropic", "Anthropic", "https://api.anthropic.com", "claude-sonnet-4-20250514",
-        listOf("claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"),
-        apiPathType = "anthropic"),
-    Supplier("nous", "Nous Portal", "https://inference.nousresearch.com", "",
-        emptyList()),
-    Supplier("openrouter", "OpenRouter", "https://openrouter.ai/api", "",
-        emptyList()),
-    Supplier("xai", "xAI (Grok)", "https://api.x.ai", "grok-2",
-        listOf("grok-2", "grok-2-mini")),
-    Supplier("custom", "自定义", "", "", emptyList(), apiPathType = "openai")
-)
+/** The market is the single catalog source; configuration only adds the custom endpoint option. */
+private val knownSuppliers: List<Supplier> = ProviderPresets.ALL
+    .map { Supplier(it.supplierId, it.name, it.baseUrl, it.defaultModel, it.models, it.apiPathType) }
+    .distinctBy { it.id }
+    .plus(Supplier("custom", "自定义", "", "", emptyList(), apiPathType = "openai"))
 
 // ── SupplierConfigScreen ──
 // Model list via fetchModels() only; never from hardcoded list or Room entity.
@@ -96,7 +77,8 @@ fun SupplierConfigScreen(
     database: AppDatabase,
     keystore: KeystoreProvider,
     openAiClient: OpenAiClient,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    showHeader: Boolean = true
 ) {
     val configDao = database.providerConfigDao()
     val scope = rememberCoroutineScope()
@@ -122,6 +104,9 @@ fun SupplierConfigScreen(
     var capAudio by remember { mutableStateOf(false) }
     var capVideo by remember { mutableStateOf(false) }
     var capToolCall by remember { mutableStateOf(true) }
+    var contextWindowText by remember { mutableStateOf("") }
+    var compactThresholdText by remember { mutableStateOf("85") }
+    var extraHeadersText by remember { mutableStateOf("") }
     var models by remember { mutableStateOf<List<String>>(emptyList()) }
     var modelsLoading by remember { mutableStateOf(false) }
     /**
@@ -136,11 +121,13 @@ fun SupplierConfigScreen(
     var newModelId by remember { mutableStateOf("") }
     var showModelDropdown by remember { mutableStateOf(false) }
     var pendingActivateId by remember { mutableStateOf<Long?>(null) }  // warn before activating
+    var pendingDelete by remember { mutableStateOf<ProviderConfigEntity?>(null) }
     var editingApiKey by remember { mutableStateOf("") }  // decrypted stored key for live fetch during edit
 
     val selectedSupplier = knownSuppliers.find { it.id == selectedSupplierId } ?: knownSuppliers.last()
     val isCustom = selectedSupplierId == "custom"
     val effectiveBaseUrl = if (isCustom) baseUrl else selectedSupplier.baseUrl
+    val localNoKeyAllowed = isLocalEndpoint(effectiveBaseUrl)
     // 手填的排在拉取结果前面:刚添加的一眼就能看到,不用在几百个模型里翻。
     val displayModels = (manualModelIds.toList() + models).distinct()
 
@@ -167,9 +154,25 @@ fun SupplierConfigScreen(
     }
 
     fun deleteConfig(cfg: ProviderConfigEntity) {
+        pendingDelete = cfg
+    }
+
+    fun confirmDelete() {
+        val cfg = pendingDelete ?: return
+        pendingDelete = null
         scope.launch {
-            withContext(Dispatchers.IO) { configDao.delete(cfg) }
-            if (activeId == cfg.id) activeId = null; loadConfigs(); status = "✓ 已删除"
+            val replacement = withContext(Dispatchers.IO) {
+                configDao.delete(cfg)
+                configDao.getAll().firstOrNull()
+            }
+            if (activeId == cfg.id) {
+                withContext(Dispatchers.IO) {
+                    configDao.deactivateAll()
+                    replacement?.let { configDao.setActive(it.id) }
+                }
+                activeId = replacement?.id
+            }
+            loadConfigs(); status = if (replacement == null) "✓ 已删除，暂无主模型" else "✓ 已删除，已切换到 ${replacement.name}"
         }
     }
 
@@ -179,6 +182,7 @@ fun SupplierConfigScreen(
         editingApiKey = ""; checkedModelIds = emptySet(); selectedApiPathType = "openai"
         manualModelIds = emptySet(); newModelId = ""
         capVision = false; capAudio = false; capVideo = false; capToolCall = true
+        contextWindowText = ""; compactThresholdText = "85"; extraHeadersText = ""
         showForm = true; status = ""
     }
 
@@ -193,6 +197,9 @@ fun SupplierConfigScreen(
         newModelId = ""
         capVision = cfg.supportsVision; capAudio = cfg.supportsAudio
         capVideo = cfg.supportsVideo; capToolCall = cfg.supportsToolCall
+        contextWindowText = if (cfg.contextWindow > 0) cfg.contextWindow.toString() else ""
+        compactThresholdText = cfg.autoCompactThresholdPercent.toString()
+        extraHeadersText = cfg.extraHeadersJson
         selectedApiPathType = cfg.apiPathType
         // Decrypt stored key so user can refresh models without re-entering
         editingApiKey = try {
@@ -203,7 +210,7 @@ fun SupplierConfigScreen(
 
     fun fetchModels() {
         val key = apiKey.ifBlank { editingApiKey }
-        if (key.isBlank() || effectiveBaseUrl.isBlank()) {
+        if ((key.isBlank() && !localNoKeyAllowed) || effectiveBaseUrl.isBlank()) {
             status = "✗ 需要 api_key 才能拉取模型列表"; return
         }
         modelsLoading = true; status = ""
@@ -237,10 +244,15 @@ fun SupplierConfigScreen(
         val url = effectiveBaseUrl.ifBlank {
             status = "✗ base_url 不能为空"; return
         }
-        if (apiKey.isBlank() && editingConfig == null) {
+        if (apiKey.isBlank() && editingConfig == null && !localNoKeyAllowed) {
             status = "✗ api_key 不能为空"; return
         }
         if (checkedModelIds.isEmpty()) { status = "✗ 至少勾选一个模型"; return }
+        val contextWindowValue = contextWindowText.trim().toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val compactThresholdValue = compactThresholdText.trim().toIntOrNull()?.coerceIn(50, 100) ?: 85
+        if (extraHeadersText.isNotBlank() && runCatching { org.json.JSONObject(extraHeadersText) }.isFailure) {
+            status = "✗ 自定义 Header 必须是 JSON 对象"; return
+        }
         if (model.isBlank() && checkedModelIds.isNotEmpty()) {
             model = checkedModelIds.first()  // auto-select first if none active
         }
@@ -261,16 +273,18 @@ fun SupplierConfigScreen(
                 supportsVision = capVision, supportsAudio = capAudio,
                 supportsVideo = capVideo, supportsToolCall = capToolCall,
                 // 编辑时保留原有的上下文窗口/压缩阈值,别被默认值悄悄清掉
-                contextWindow = editingConfig?.contextWindow ?: 0,
-                autoCompactThresholdPercent = editingConfig?.autoCompactThresholdPercent ?: 85,
-                extraHeadersJson = editingConfig?.extraHeadersJson ?: ""
+                contextWindow = contextWindowValue,
+                autoCompactThresholdPercent = compactThresholdValue,
+                extraHeadersJson = extraHeadersText.trim()
             )
             if (editingConfig != null) {
                 withContext(Dispatchers.IO) { configDao.update(entity) }
             } else {
                 val newId = withContext(Dispatchers.IO) { configDao.insert(entity) }
-                withContext(Dispatchers.IO) { configDao.deactivateAll(); configDao.setActive(newId) }
-                activeId = newId
+                if (entity.isActive) {
+                    withContext(Dispatchers.IO) { configDao.deactivateAll(); configDao.setActive(newId) }
+                    activeId = newId
+                }
             }
             showForm = false; loadConfigs()
             status = "✓ 配置已保存"
@@ -279,41 +293,47 @@ fun SupplierConfigScreen(
 
     LaunchedEffect(Unit) { loadConfigs() }
 
-    Column(Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 24.dp)) {
-        // Header
-        Text("← 返回", fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = Sub,
-            modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onBack() })
-        Spacer(Modifier.height(16.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("供应商配置", fontSize = 14.sp, fontFamily = FontFamily.Monospace, color = Ink)
-            Text("+ 新建", fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = Sub,
-                modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { startNew() })
+    Column(Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 16.dp)) {
+        if (showHeader) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回", tint = Ink) }
+                Text("供应商配置", fontSize = 17.sp, color = Ink, modifier = Modifier.weight(1f))
+                TextButton(onClick = { startNew() }) { Text("新建", color = Green) }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { startNew() }) { Text("新建供应商", color = Green) }
+            }
         }
-        Spacer(Modifier.height(12.dp))
 
         // Config list
         if (savedConfigs.isEmpty()) {
             Text("暂无配置，点「+ 新建」创建", fontSize = 12.sp, fontFamily = FontFamily.Monospace,
                 color = Faint, modifier = Modifier.padding(vertical = 24.dp))
         } else {
-            savedConfigs.forEach { cfg ->
-                val isActive = cfg.id == activeId
-                Row(Modifier.fillMaxWidth().background(if (isActive) LocalHsuColors.current.activeBg else Bg)
+                savedConfigs.forEach { cfg ->
+                    val isActive = cfg.id == activeId
+                Row(Modifier.fillMaxWidth()
+                    .background(if (isActive) LocalHsuColors.current.activeBg else LocalHsuColors.current.bgElevated)
+                    .border(1.dp, if (isActive) Green else Border, RoundedCornerShape(10.dp))
                     .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { activateConfig(cfg.id) }
-                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
+                    ProviderLogo(cfg.supplierId, cfg.name, logoSize = 56.dp)
+                    Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(cfg.name, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                        Text(cfg.name, fontSize = 14.sp,
                             color = if (isActive) Ink else Sub)
                         Text("${knownSuppliers.find{it.id==cfg.supplierId}?.name ?: cfg.supplierId} · ${cfg.model}",
-                            fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Faint)
+                            fontSize = 11.sp, color = Faint, maxLines = 1)
                     }
-                    if (isActive) Text("✓", fontSize = 12.sp, color = Green, modifier = Modifier.padding(end = 8.dp))
-                    Text("✎", fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = Sub,
-                        modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { startEdit(cfg) }.padding(4.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("✗", fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = Red,
-                        modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { deleteConfig(cfg) }.padding(4.dp))
+                    if (isActive) Icon(Icons.Outlined.CheckCircle, contentDescription = "当前主模型", tint = Green, modifier = Modifier.size(22.dp).padding(end = 2.dp))
+                    IconButton(onClick = { startEdit(cfg) }, modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.Outlined.Edit, contentDescription = "编辑 ${cfg.name}", tint = Sub)
+                    }
+                    IconButton(onClick = { deleteConfig(cfg) }, modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.Outlined.Delete, contentDescription = "删除 ${cfg.name}", tint = Red)
+                    }
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Border))
             }
@@ -338,7 +358,9 @@ fun SupplierConfigScreen(
             Label("供应商")
             Box(Modifier.fillMaxWidth().zIndex(10f)) {
                 Row(Modifier.fillMaxWidth().border(1.dp, Faint).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(selectedSupplier.name, fontSize = 13.sp, fontFamily = FontFamily.Monospace, color = Ink,
+                    ProviderLogo(selectedSupplier.id, selectedSupplier.name, logoSize = 44.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(selectedSupplier.name, fontSize = 13.sp, color = Ink,
                         modifier = Modifier.weight(1f).clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
                             showSupplierDropdown = !showSupplierDropdown
                         }.padding(horizontal = 8.dp, vertical = 4.dp))
@@ -348,16 +370,23 @@ fun SupplierConfigScreen(
                     Column(Modifier.fillMaxWidth().offset(y = 48.dp).background(Bg).border(1.dp, Faint)
                         .padding(vertical = 4.dp).heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
                         knownSuppliers.forEach { sup ->
-                            Text(sup.name, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                                color = if (sup.id == selectedSupplierId) Ink else Sub,
-                                modifier = Modifier.fillMaxWidth()
+                            Row(
+                                Modifier.fillMaxWidth()
                                     .background(if (sup.id == selectedSupplierId) LocalHsuColors.current.activeBg else Bg)
                                     .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
                                         selectedSupplierId = sup.id; showSupplierDropdown = false
                                         model = sup.defaultModel; models = emptyList()
                                         selectedApiPathType = sup.apiPathType
                                         if (sup.id != "custom") baseUrl = sup.baseUrl else baseUrl = ""
-                                    }.padding(horizontal = 12.dp, vertical = 7.dp))
+                                    }.padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ProviderLogo(sup.id, sup.name, logoSize = 40.dp)
+                                Spacer(Modifier.width(8.dp))
+                                Text(sup.name, fontSize = 12.sp,
+                                    color = if (sup.id == selectedSupplierId) Ink else Sub,
+                                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            }
                         }
                     }
                 }
@@ -421,11 +450,11 @@ fun SupplierConfigScreen(
                 Spacer(Modifier.height(12.dp))
             }
 
-            Label("api_key")
+            Label(if (localNoKeyAllowed) "api_key（本地服务可留空）" else "api_key")
             TextField(value = apiKey, onValueChange = { apiKey = it },
                 modifier = Modifier.fillMaxWidth(), singleLine = true, colors = fieldColors(), textStyle = fieldTextStyle(),
                 visualTransformation = PasswordVisualTransformation(),
-                placeholder = { Text(if (editingConfig != null && apiKey.isEmpty()) "留空则保留原 Key" else "sk-...", color = Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace) })
+                placeholder = { Text(if (localNoKeyAllowed) "本地 Ollama / LM Studio 通常无需 Key" else if (editingConfig != null && apiKey.isEmpty()) "留空则保留原 Key" else "sk-...", color = Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace) })
             Spacer(Modifier.height(12.dp))
 
             Label("启用模型（多选）")
@@ -514,7 +543,7 @@ fun SupplierConfigScreen(
                                                 modifier = Modifier.size(12.dp).padding(end = 2.dp),
                                                 tint = Red
                                             )
-                                            Text("该模型已不可用，将自动取消勾选", fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = Red)
+                                            Text("该模型已不可用，保存前请确认是否移除", fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = Red)
                                         }
                                     }
                                 }
@@ -539,6 +568,27 @@ fun SupplierConfigScreen(
                     }
                 }
             }
+            Spacer(Modifier.height(16.dp))
+
+            Label("高级连接设置")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextField(
+                    value = contextWindowText, onValueChange = { contextWindowText = it }, modifier = Modifier.weight(1f), singleLine = true,
+                    label = { Text("上下文 tokens", fontSize = 11.sp) }, colors = fieldColors(), textStyle = fieldTextStyle(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                TextField(
+                    value = compactThresholdText, onValueChange = { compactThresholdText = it }, modifier = Modifier.width(150.dp), singleLine = true,
+                    label = { Text("压缩阈值 %", fontSize = 11.sp) }, colors = fieldColors(), textStyle = fieldTextStyle(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            TextField(
+                value = extraHeadersText, onValueChange = { extraHeadersText = it }, modifier = Modifier.fillMaxWidth(),
+                minLines = 2, maxLines = 5, label = { Text("自定义请求 Header（JSON，可选）", fontSize = 11.sp) },
+                placeholder = { Text("例如 {\"X-Title\":\"HSUCODE\"}", fontSize = 11.sp, color = Faint) },
+                colors = fieldColors(), textStyle = fieldTextStyle()
+            )
+            Text("Header 会原样发送，保存前会校验 JSON；不要把密钥写入这里。", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Faint, modifier = Modifier.padding(top = 3.dp))
             Spacer(Modifier.height(16.dp))
 
             // ---- 能力声明 ----
@@ -614,6 +664,16 @@ fun SupplierConfigScreen(
                 containerColor = Bg
             )
         }
+        pendingDelete?.let { target ->
+            AlertDialog(
+                onDismissRequest = { pendingDelete = null },
+                title = { Text("删除供应商配置", color = Ink) },
+                text = { Text("确定删除「${target.name}」吗？其 API Key 和模型列表会从本机配置中移除。已有会话不会被删除。", color = Ink, lineHeight = 18.sp) },
+                confirmButton = { TextButton(onClick = { confirmDelete() }) { Text("删除", color = Red) } },
+                dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消", color = Sub) } },
+                containerColor = Bg
+            )
+        }
     }
 }
 
@@ -664,3 +724,10 @@ private fun fieldColors() = TextFieldDefaults.colors(
 
 @Composable
 private fun fieldTextStyle() = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+
+private fun isLocalEndpoint(url: String): Boolean {
+    val value = url.trim().lowercase()
+    return value.startsWith("http://localhost") || value.startsWith("http://127.") ||
+        value.startsWith("http://10.") || value.startsWith("http://192.168.") ||
+        Regex("^http://172\\.(1[6-9]|2\\d|3[0-1])\\.").containsMatchIn(value)
+}

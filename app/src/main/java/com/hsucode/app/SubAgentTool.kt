@@ -47,8 +47,7 @@ class SubAgentTool(
         private const val APPROVAL_TIMEOUT_MS = 5 * 60 * 1000L
         private const val ACTIVITY_THROTTLE_MS = 120L
         private val READONLY_DEFAULT = listOf("file_read", "list_dir", "grep", "glob")
-        // 无论子智能体类型如何,都【始终】赋予联网工具——否则研究/探索类会退化成只翻本地文件、直到超时。
-        private val ALWAYS_GRANTED = listOf("web_search", "web_fetch", "invoke_skill")
+        private const val INVOKE_SKILL = "invoke_skill"
     }
 
     private val controlScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -101,6 +100,15 @@ class SubAgentTool(
                 "你这次传的是: ${args.toString().take(200)}"
         )
         return runAssignments(arr)
+    }
+
+    /** Runs one configured agent from the agent center using the exact same safety path as model dispatch. */
+    suspend fun runDirect(agentName: String, task: String): ToolResult {
+        if (agentName.isBlank() || task.isBlank()) return ToolResult.Error("智能体名称和任务不能为空")
+        return runAssignments(JSONArray().put(JSONObject().apply {
+            put("agent", agentName.trim())
+            put("task", task.trim())
+        }))
     }
 
     /**
@@ -199,6 +207,12 @@ class SubAgentTool(
             recordEvent(runId, workerRunId, agentName, "failed", SubAgentSceneState.Status.FAILED, error)
             return result(agentName, false, error, "failed", workerRunId)
         }
+        if (!def.enabled) {
+            val error = "智能体「$agentName」已停用，请在智能体中心启用后再派发"
+            scene?.fail(workerRunId, SubAgentSceneState.Status.FAILED, error)
+            recordEvent(runId, workerRunId, agentName, "failed", SubAgentSceneState.Status.FAILED, error)
+            return result(agentName, false, error, "failed", workerRunId)
+        }
         scene?.setStatus(workerRunId, SubAgentSceneState.Status.RUNNING, "分析任务")
         recordEvent(runId, workerRunId, agentName, "started", SubAgentSceneState.Status.RUNNING, task)
         var core: AgentCore? = null
@@ -282,8 +296,11 @@ class SubAgentTool(
         val toolNames = def.toolNames.split(",").map { it.trim() }.filter { it.isNotEmpty() }
             .ifEmpty { READONLY_DEFAULT }
         for (n in toolNames) mainRegistry.get(n)?.let { reg.register(it) }
-        // 始终赋予联网 + 技能工具(去重),让子智能体能真正上网搜/抓,而不是只翻本地文件到超时。
-        for (n in ALWAYS_GRANTED) if (reg.get(n) == null) mainRegistry.get(n)?.let { reg.register(it) }
+        // 有专属技能才赋予技能调用入口。除此之外严格遵守用户配置的白名单;
+        // 不能在 UI 标注“无网络权限”却在这里静默塞入 web_search/web_fetch。
+        if (def.skillNames.isNotBlank() && reg.get(INVOKE_SKILL) == null) {
+            mainRegistry.get(INVOKE_SKILL)?.let { reg.register(it) }
+        }
         return AgentCore(
             openAiClient = openAiClient,
             toolRegistry = reg,
@@ -292,6 +309,7 @@ class SubAgentTool(
             sessionId = -20L,
             systemPrompt = buildSystemPrompt(def)
         ).also {
+            it.temperature = def.temperature.coerceIn(0f, 2f)
             it.isReviewFork = true // 不递归触发后台复盘
             it.setConfirmHandler { cmd, preview ->
                 val room = scene ?: return@setConfirmHandler ToolConfirmResult.DENY

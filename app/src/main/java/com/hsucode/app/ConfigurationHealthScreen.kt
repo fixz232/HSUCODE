@@ -97,20 +97,24 @@ object ConfigurationHealth {
         if (cfg.baseUrl.isBlank() || cfg.model.isBlank()) {
             return HealthCheck("provider", "主模型", "端点或模型 ID 不完整", HealthLevel.ERROR, HealthAction.PROVIDER)
         }
-        val key = runCatching { app.keystore.decrypt(Base64.decode(cfg.apiKeyEnc, Base64.NO_WRAP)) }
+        val key = runCatching {
+            if (cfg.apiKeyEnc.isBlank()) "" else app.keystore.decrypt(Base64.decode(cfg.apiKeyEnc, Base64.NO_WRAP))
+        }
             .getOrElse {
                 return HealthCheck("provider", "主模型", "API Key 无法解密", HealthLevel.ERROR, HealthAction.PROVIDER)
             }
-        if (key.isBlank()) return HealthCheck("provider", "主模型", "API Key 为空", HealthLevel.ERROR, HealthAction.PROVIDER)
-        if (!testModel) return HealthCheck("provider", "主模型", "${cfg.name} · ${cfg.model} · 密钥可用", HealthLevel.OK, HealthAction.PROVIDER)
-        val models = app.openAiClient.listModels(cfg.baseUrl, key).getOrElse {
-            return HealthCheck("provider", "主模型", "连接失败: ${it.message?.take(100)}", HealthLevel.ERROR, HealthAction.PROVIDER)
+        val local = cfg.baseUrl.contains("localhost", true) ||
+            cfg.baseUrl.contains("127.0.0.1") || cfg.baseUrl.contains("10.0.2.2")
+        if (key.isBlank() && !local && cfg.apiPathType != "anthropic") {
+            return HealthCheck("provider", "主模型", "API Key 为空", HealthLevel.ERROR, HealthAction.PROVIDER)
         }
-        return if (models.isNotEmpty()) {
-            HealthCheck("provider", "主模型", "连接正常 · 返回 ${models.size} 个模型", HealthLevel.OK, HealthAction.PROVIDER)
-        } else {
-            HealthCheck("provider", "主模型", "端点未返回模型列表,可手动确认模型 ID", HealthLevel.WARNING, HealthAction.PROVIDER)
+        if (!testModel) return HealthCheck("provider", "主模型", "${cfg.name} · ${cfg.model} · ${if (local) "本地端点" else "密钥可用"}", HealthLevel.OK, HealthAction.PROVIDER)
+        val smoke = app.openAiClient.testConfig(cfg)
+        if (!smoke.ok) {
+            return HealthCheck("provider", "主模型", "连接失败: ${smoke.message.take(120)}", HealthLevel.ERROR, HealthAction.PROVIDER)
         }
+        val listDetail = smoke.modelListStatus.takeIf { it.isNotBlank() && it != "未测试" } ?: "未提供模型列表"
+        return HealthCheck("provider", "主模型", "真实请求正常 · ${smoke.latencyMs}ms · $listDetail", HealthLevel.OK, HealthAction.PROVIDER)
     }
 
     private fun workspace(app: HsucodeApplication): HealthCheck {
@@ -153,10 +157,10 @@ object ConfigurationHealth {
     }
 
     private fun environment(): HealthCheck {
-        val ready = LinuxEnvironment.isReady()
+        val ready = WorkspaceRuntime.hasLinux()
         return HealthCheck(
-            "ubuntu", "Ubuntu 环境",
-            if (ready) "已就绪" else "未部署（仅环境工具需要）",
+            "ubuntu", "免 Root Ubuntu",
+            if (ready) "${WorkspaceRuntime.detail()} 已就绪" else "未部署（可在环境配置中安装）",
             if (ready) HealthLevel.OK else HealthLevel.INFO, HealthAction.ENVIRONMENT
         )
     }

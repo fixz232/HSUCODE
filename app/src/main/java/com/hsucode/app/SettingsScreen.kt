@@ -8,6 +8,7 @@ package com.hsucode.app
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -45,12 +46,15 @@ private data class SettingsEntry(
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
+    onNavigateToModelCenter: () -> Unit = {},
     onNavigateToSupplierConfig: () -> Unit,
     onNavigateToModelMarket: () -> Unit = {},
     onNavigateToGit: () -> Unit = {},
     onNavigateToAuditLog: () -> Unit,
     onNavigateToMemoryStorage: () -> Unit = {},
     rootDetector: RootDetector? = null,
+    rootModeEnabled: Boolean = false,
+    onUpdateRootMode: (Boolean) -> Unit = {},
     permissionMode: PermissionMode = PermissionMode.ASK,
     onUpdatePermissionMode: (PermissionMode) -> Unit = {},
     onRootDiagnostic: (() -> Unit)? = null,
@@ -78,6 +82,7 @@ fun SettingsScreen(
     onNavigateToProfiles: () -> Unit = {},
     onNavigateToSubAgents: () -> Unit = {},
     onNavigateToEnvConfig: () -> Unit = {},
+    onNavigateToDeveloperWorkbench: () -> Unit = {},
     onNavigateToBackup: () -> Unit = {},
     onNavigateToTaskRecovery: () -> Unit = {},
     onNavigateToHealth: () -> Unit = {},
@@ -104,20 +109,26 @@ fun SettingsScreen(
         SettingsEntry("appearance", "回车发送", if (app.enterToSend) "回车发送消息" else "回车换行", Icons.Outlined.Keyboard,
             { app.updateEnterToSend(!app.enterToSend) }, app.enterToSend, app::updateEnterToSend),
 
-        SettingsEntry("models", "模型市场", "添加预置供应商和模型", Icons.Outlined.Storefront, onNavigateToModelMarket),
-        SettingsEntry("models", "供应商配置", "API 端点、密钥和默认模型", Icons.Outlined.Cloud, onNavigateToSupplierConfig),
-        SettingsEntry("models", "功能模型", "总结、复盘、子智能体和裁判模型", Icons.Outlined.AccountTree, onNavigateToFunctionModels),
-        SettingsEntry("models", "模型委托", "视觉、推理、翻译和转写模型", Icons.Outlined.Tune, onNavigateToAuxModels),
+        SettingsEntry("models", "模型中心", "供应商、模型、功能分配、健康与智能路由", Icons.Outlined.Hub, onNavigateToModelCenter),
 
         SettingsEntry("security", "Root 状态", rootDetector?.status?.label ?: "检测中", Icons.Outlined.AdminPanelSettings,
             { rootDetector?.recheck() }),
+        SettingsEntry(
+            "security",
+            "Root 模式",
+            if (rootModeEnabled) "已开启：允许使用 Root chroot 环境" else "已关闭：默认使用免 Root PRoot 环境",
+            Icons.Outlined.Security,
+            { onUpdateRootMode(!rootModeEnabled) },
+            rootModeEnabled,
+            onUpdateRootMode
+        ),
         SettingsEntry("security", "配置健康中心", "集中检查关键配置与后台能力", Icons.Outlined.HealthAndSafety,
             onNavigateToHealth),
         SettingsEntry("security", "Root 诊断", "检查命令和关键目录访问", Icons.Outlined.BugReport,
             { onRootDiagnostic?.invoke() }),
         SettingsEntry("security", "审计日志", "工具调用、决策和执行结果", Icons.Outlined.History, onNavigateToAuditLog),
 
-        SettingsEntry("data", "全局工作区", workspaceRoot.ifBlank { "/storage/emulated/0/HSUCODE" }, Icons.Outlined.FolderOpen,
+        SettingsEntry("data", "全局工作区", "${workspaceRoot.ifBlank { UserWorkspaceShell.displayPath() }} · ${WorkspaceManager.describe()}", Icons.Outlined.FolderOpen,
             { showWorkspaceDialog = true }),
         SettingsEntry("data", "记忆与存储", "本地记忆数据", Icons.Outlined.Storage, onNavigateToMemoryStorage),
         SettingsEntry("data", "备份与恢复", "全量加密备份与跨设备恢复", Icons.Outlined.Backup, onNavigateToBackup),
@@ -127,6 +138,7 @@ fun SettingsScreen(
         SettingsEntry("data", "定时任务", "后台自动任务", Icons.Outlined.Schedule, onNavigateToCron),
         SettingsEntry("data", "用量分析", "模型、Token、缓存与费用趋势", Icons.Outlined.Analytics, onNavigateToUsageStats),
 
+        SettingsEntry("tools", "开发工作台", "文件、网络、MCP、Skills 与提示词", Icons.Outlined.DeveloperMode, onNavigateToDeveloperWorkbench),
         SettingsEntry("tools", "环境配置", "开发运行时和命令行工具", Icons.Outlined.Terminal, onNavigateToEnvConfig),
         SettingsEntry("tools", "配置环境", "工作与个人环境配置", Icons.Outlined.Workspaces, onNavigateToProfiles),
         SettingsEntry("tools", "子智能体", "专职智能体与工具范围", Icons.Outlined.SmartToy, onNavigateToSubAgents),
@@ -150,29 +162,57 @@ fun SettingsScreen(
                 entry.description.contains(normalizedQuery, true))
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().background(colors.bg),
-        contentPadding = PaddingValues(bottom = 28.dp)
-    ) {
-        item {
-            Row(
-                Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Outlined.ArrowBack, contentDescription = "返回", tint = colors.ink)
-                }
-                Text("设置", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                IconButton(onClick = onOpenDrawer) {
-                    Icon(Icons.Outlined.Menu, contentDescription = "打开导航", tint = colors.sub)
-                }
+    // Keep the first viewport focused on the workflows users open most often.
+    val quickLabels = remember {
+        setOf("模型中心", "开发工作台", "全局工作区", "配置健康中心", "备份与恢复")
+    }
+    val quickEntries = remember(entries) {
+        quickLabels.mapNotNull { label -> entries.firstOrNull { it.label == label } }
+    }
+    var expandedCategories by rememberSaveable {
+        mutableStateOf(listOf("models", "security"))
+    }
+    val expandedSet = expandedCategories.toSet()
+    fun toggleCategory(id: String) {
+        expandedCategories = if (id in expandedSet) {
+            expandedCategories.filterNot { it == id }
+        } else {
+            expandedCategories + id
+        }
+    }
+    val matchesPermission = normalizedQuery.isEmpty() ||
+        "工具权限".contains(normalizedQuery, true) ||
+        "询问只读完全访问".contains(normalizedQuery, true)
+    val showQuick = category == "all" && normalizedQuery.isEmpty()
+
+    Column(Modifier.fillMaxSize().background(colors.bg)) {
+        Row(
+            Modifier.fillMaxWidth()
+                .background(colors.bgElevated)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Outlined.ArrowBack, contentDescription = "返回", tint = colors.ink)
+            }
+            Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                Text("设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text("配置模型、工作区与权限", style = MaterialTheme.typography.bodySmall, color = colors.sub)
+            }
+            IconButton(onClick = onOpenDrawer) {
+                Icon(Icons.Outlined.Menu, contentDescription = "打开导航", tint = colors.sub)
             }
         }
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
         item {
-            OutlinedTextField(
+            TextField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).heightIn(min = 54.dp),
                 singleLine = true,
                 leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
                 trailingIcon = {
@@ -181,12 +221,22 @@ fun SettingsScreen(
                     }
                 },
                 placeholder = { Text("搜索设置") },
-                shape = RoundedCornerShape(8.dp)
+                shape = RoundedCornerShape(14.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = colors.bgElevated,
+                    unfocusedContainerColor = colors.bgElevated,
+                    disabledContainerColor = colors.bgElevated,
+                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    focusedLeadingIconColor = colors.green,
+                    unfocusedLeadingIconColor = colors.sub,
+                    cursorColor = colors.green
+                )
             )
         }
         item {
             LazyRow(
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(categories) { item ->
@@ -199,16 +249,40 @@ fun SettingsScreen(
             }
         }
 
-        val showPermission = (category == "all" || category == "security") &&
-            (normalizedQuery.isEmpty() || "工具权限".contains(normalizedQuery, true) || "询问只读完全访问".contains(normalizedQuery, true))
-        if (showPermission) {
-            item { SettingsSectionTitle("工具权限") }
+        if (showQuick) {
             item {
-                PermissionSelector(permissionMode, onUpdatePermissionMode)
+                SettingsSectionTitle("常用设置", "快速进入正在使用的核心功能")
+            }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(quickEntries, key = { it.label }) { entry ->
+                        SettingsQuickTile(entry)
+                    }
+                }
             }
         }
 
-        if (filtered.isEmpty() && !showPermission) {
+        val grouped = filtered.groupBy { it.category }
+        val sectionOrder = listOf("appearance", "models", "security", "data", "tools", "about")
+        val sectionNames = mapOf(
+            "appearance" to ("外观与输入" to "主题、输入行为和显示偏好"),
+            "models" to ("模型中心" to "供应商、模型、路由和健康"),
+            "security" to ("权限与安全" to "工具权限、Root 和审计记录"),
+            "data" to ("数据与自动化" to "工作区、记忆、备份和任务"),
+            "tools" to ("开发工具" to "终端、文件、联网和扩展能力"),
+            "about" to ("关于" to "版本、更新、开源许可和致谢")
+        )
+        val visibleSections = sectionOrder.filter { section ->
+            val sectionItems = grouped[section].orEmpty().filterNot {
+                showQuick && it.label in quickLabels
+            }
+            sectionItems.isNotEmpty() || (section == "security" && category != "all" && matchesPermission)
+        }
+
+        if (visibleSections.isEmpty()) {
             item {
                 Column(
                     Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 56.dp),
@@ -220,23 +294,34 @@ fun SettingsScreen(
                 }
             }
         } else {
-            val grouped = filtered.groupBy { it.category }
-            val sectionOrder = listOf("appearance", "models", "security", "data", "tools", "about")
-            val sectionNames = mapOf(
-                "appearance" to "外观与输入", "models" to "账户与模型", "security" to "权限与安全",
-                "data" to "数据与自动化", "tools" to "开发工具", "about" to "关于"
-            )
-            sectionOrder.forEach { section ->
-                val sectionItems = grouped[section].orEmpty()
-                if (sectionItems.isNotEmpty()) {
-                    item { SettingsSectionTitle(sectionNames.getValue(section)) }
-                    items(sectionItems, key = { it.label }) { entry -> SettingsRow(entry) }
-                    if (section == "security" && rootDiagnosticResult != null) {
-                        item { RootDiagnosticPanel(rootDiagnosticResult) }
+            visibleSections.forEach { section ->
+                val sectionItems = grouped[section].orEmpty().filterNot {
+                    showQuick && it.label in quickLabels
+                }
+                val expanded = normalizedQuery.isNotEmpty() || category != "all" || section in expandedSet
+                item(key = "section_$section") {
+                    SettingsSectionHeader(
+                        title = sectionNames.getValue(section).first,
+                        description = sectionNames.getValue(section).second,
+                        count = sectionItems.size + if (section == "security" && matchesPermission) 1 else 0,
+                        expanded = expanded,
+                        onClick = { toggleCategory(section) }
+                    )
+                }
+                if (expanded) {
+                    item(key = "section_body_$section") {
+                        SettingsSectionBody(
+                            sectionItems = sectionItems,
+                            showPermission = section == "security" && matchesPermission,
+                            permissionMode = permissionMode,
+                            onUpdatePermissionMode = onUpdatePermissionMode,
+                            rootDiagnosticResult = if (section == "security") rootDiagnosticResult else null
+                        )
                     }
                 }
             }
         }
+    }
     }
 
     if (showWorkspaceDialog) {
@@ -256,41 +341,138 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsSectionTitle(title: String) {
-    Text(
-        title,
-        style = MaterialTheme.typography.labelLarge,
-        color = LocalHsuColors.current.sub,
-        modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 18.dp, bottom = 6.dp)
-    )
+private fun SettingsSectionTitle(title: String, description: String? = null) {
+    Column(Modifier.padding(start = 24.dp, end = 24.dp, top = 18.dp, bottom = 6.dp)) {
+        Text(title, style = MaterialTheme.typography.labelLarge, color = LocalHsuColors.current.sub)
+        if (!description.isNullOrBlank()) {
+            Text(description, style = MaterialTheme.typography.bodySmall, color = LocalHsuColors.current.faint)
+        }
+    }
 }
 
 @Composable
-private fun SettingsRow(entry: SettingsEntry) {
+private fun SettingsSectionHeader(
+    title: String,
+    description: String,
+    count: Int,
+    expanded: Boolean,
+    onClick: () -> Unit
+) {
     val colors = LocalHsuColors.current
-    Surface(onClick = entry.onClick, color = colors.bg, modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        onClick = onClick,
+        color = colors.bg,
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 20.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().heightIn(min = 58.dp).padding(horizontal = 20.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(entry.icon, contentDescription = null, tint = colors.sub, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
-                Text(entry.label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                Text(
-                    entry.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.sub,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(description, style = MaterialTheme.typography.bodySmall, color = colors.sub, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Spacer(Modifier.width(12.dp))
-            if (entry.toggleValue != null && entry.onToggle != null) {
-                Switch(checked = entry.toggleValue, onCheckedChange = entry.onToggle)
-            } else {
-                Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = colors.faint)
+            Text(count.toString(), style = MaterialTheme.typography.labelMedium, color = colors.faint)
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                contentDescription = if (expanded) "收起$title" else "展开$title",
+                tint = colors.sub,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsQuickTile(entry: SettingsEntry) {
+    val colors = LocalHsuColors.current
+    Surface(
+        onClick = entry.onClick,
+        color = colors.bgElevated,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.width(156.dp).heightIn(min = 72.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(entry.icon, contentDescription = null, tint = colors.green, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(entry.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(entry.description, style = MaterialTheme.typography.labelSmall, color = colors.sub, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+        }
+    }
+}
+
+@Composable
+private fun SettingsSectionBody(
+    sectionItems: List<SettingsEntry>,
+    showPermission: Boolean,
+    permissionMode: PermissionMode,
+    onUpdatePermissionMode: (PermissionMode) -> Unit,
+    rootDiagnosticResult: RootDiagnosticResult?
+) {
+    val colors = LocalHsuColors.current
+    Surface(
+        color = colors.bgElevated,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .border(1.dp, colors.border, RoundedCornerShape(8.dp))
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            if (showPermission) {
+                PermissionSelector(permissionMode, onUpdatePermissionMode)
+                if (sectionItems.isNotEmpty()) {
+                    HorizontalDivider(color = colors.border)
+                }
+            }
+            sectionItems.forEachIndexed { index, entry ->
+                SettingsRow(entry, showDivider = index < sectionItems.lastIndex || rootDiagnosticResult != null)
+            }
+            if (rootDiagnosticResult != null) {
+                if (sectionItems.isNotEmpty()) HorizontalDivider(color = colors.border)
+                RootDiagnosticPanel(rootDiagnosticResult)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsRow(entry: SettingsEntry, showDivider: Boolean = false) {
+    val colors = LocalHsuColors.current
+    Column(Modifier.fillMaxWidth()) {
+        Surface(onClick = entry.onClick, color = androidx.compose.ui.graphics.Color.Transparent, modifier = Modifier.fillMaxWidth()) {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(entry.icon, contentDescription = null, tint = colors.sub, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(entry.label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                    Text(
+                        entry.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.sub,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                if (entry.toggleValue != null && entry.onToggle != null) {
+                    Switch(checked = entry.toggleValue, onCheckedChange = entry.onToggle)
+                } else {
+                    Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = colors.faint)
+                }
+            }
+        }
+        if (showDivider) {
+            HorizontalDivider(color = colors.border, modifier = Modifier.padding(start = 50.dp))
         }
     }
 }
@@ -332,8 +514,7 @@ private fun RootDiagnosticPanel(diag: RootDiagnosticResult) {
     val colors = LocalHsuColors.current
     val success = diag.errors.isEmpty()
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
-            .background(colors.bgElevated, RoundedCornerShape(8.dp)).padding(14.dp)
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(

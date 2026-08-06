@@ -127,6 +127,7 @@ class HsucodeApplication : Application() {
     var permissionModeState by mutableStateOf(PermissionMode.ASK)
         private set
     private lateinit var toolRegistry: ToolRegistry
+    private lateinit var subAgentTool: SubAgentTool
 
     var currentModelLabel by mutableStateOf("")
         private set
@@ -141,6 +142,10 @@ class HsucodeApplication : Application() {
 
     /** 输入框回车行为:true=回车直接发送(换行用输入法的组合键);false=回车换行(发送靠 [→] 键)。持久化到 `enter_to_send`。 */
     var enterToSend by mutableStateOf(true)
+        private set
+
+    /** Root chroot is an explicit opt-in; the default execution backend is rootless PRoot. */
+    var rootModeEnabled by mutableStateOf(false)
         private set
 
     /** Live plan card state — populated by `agent_plan` tool. Application-scoped so it
@@ -316,8 +321,27 @@ override fun onCreate() {
 
         // 内置 Linux 环境(root+chroot Ubuntu):定位私有目录,若已部署则标记就绪。
         LinuxEnvironment.init(this)
+        // 默认工作区目录会挂载到 PRoot Ubuntu 的 /workspace；未安装 Ubuntu 时仍可跑 Android Shell。
+        UserWorkspaceShell.init(this)
+        // 所有会话、后台任务和文件工具共享同一应用私有默认根，避免 rootless 设备回落到
+        // Android 11+ 无法稳定写入的共享存储路径。
+        UserWorkspaceShell.directory()?.absolutePath?.let {
+            com.hsucode.tools.WorkspaceContext.configureDefaultRoot(it)
+        }
+        ProotLinuxEnvironment.init(this)
         // 部署/安装的流式输出汇聚到可视终端。
         LinuxEnvironment.outputSink = { terminalState.appendChunk(it) }
+        ProotLinuxEnvironment.outputSink = { terminalState.appendChunk(it) }
+
+        // Rootless Ubuntu is the default workspace. Bootstrap once in the application scope so
+        // the Agent and terminal do not silently start in the limited Android Shell fallback.
+        if (ProotLinuxEnvironment.state == ProotLinuxEnvironment.State.NOT_SETUP &&
+            ProotLinuxEnvironment.isSupported()
+        ) {
+            applicationScope.launch(Dispatchers.IO) {
+                ProotLinuxEnvironment.bootstrap()
+            }
+        }
 
         // ---- libsu root shell (replaces PersistentRootShell) ----
         RootShellManager.init()
@@ -349,6 +373,7 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         // 做成独立工具后意图是显式的,安全门也能按工具名单独识别,不必在所有 shell 里猜。
         toolRegistry.register(DeleteFileTool())
         toolRegistry.register(MakeDirectoryTool())
+        toolRegistry.register(DocumentCreateTool())
         // 下载与抓网页分开:web_fetch 抽正文【进】上下文,download_file 存字节【不进】上下文。
         // 二进制走 web_fetch 既没意义又顶爆上下文。
         toolRegistry.register(DownloadFileTool())
@@ -381,7 +406,8 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         toolRegistry.register(AskReasoningTool(database, keystore))        // 深度推理
         toolRegistry.register(TranslateTool(database, keystore))           // 翻译
         // 子智能体调度:主脑把任务拆给专职子智能体并行处理(带指挥室动画状态)。
-        toolRegistry.register(SubAgentTool(toolRegistry, subAgentClient, database, securityGate, subAgentScene))
+        subAgentTool = SubAgentTool(toolRegistry, subAgentClient, database, securityGate, subAgentScene)
+        toolRegistry.register(subAgentTool)
 
         // Web tools — search + fetch
         val webSearchTool = WebSearchTool().also { this.webSearchTool = it }
@@ -445,7 +471,17 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
 
         // 步骤3: 冷启动时同步加载当前 session 历史(UI 列表 + AgentCore 内存),阻塞确保在 send() 之前完成
         runBlocking {
-            workspaceRootGlobal = database.settingDao().get("workspace_root") ?: ""
+            // 终端的 /workspace 是应用私有目录。旧逻辑在首次启动时让文件工具回落到
+            // /storage/emulated/0/HSUCODE，导致终端、Agent 和文件页实际看到的是三套目录，
+            // 且 Android 11+ 对该外部路径通常没有直接读写权限。首次使用统一到同一私有目录；
+            // 用户已经明确设置过的工作区保持不变。
+            val savedWorkspace = database.settingDao().get("workspace_root").orEmpty().trim()
+            workspaceRootGlobal = savedWorkspace.ifBlank {
+                UserWorkspaceShell.directory()?.absolutePath.orEmpty()
+            }
+            if (savedWorkspace.isBlank() && workspaceRootGlobal.isNotBlank()) {
+                database.settingDao().put("workspace_root", workspaceRootGlobal)
+            }
             auxVisionBaseUrl = database.settingDao().get("aux_vision_base_url") ?: ""
             auxVisionModel = database.settingDao().get("aux_vision_model") ?: ""
             auxVisionKeySet = !database.settingDao().get("aux_vision_api_key").isNullOrBlank()
@@ -499,6 +535,13 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
             }
         }
 
+        // 上游内置技能包:升级后幂等导入 APK assets,新安装无需手动准备逆向/构建/审计技能。
+        applicationScope.launch(Dispatchers.IO) {
+            try { AssetsSkillImporter.install(this@HsucodeApplication, database) } catch (e: Exception) {
+                Log.w("HsucodeApp", "bundled skill install failed: ${e.message}")
+            }
+        }
+
         // Hermes-⑦ 定时任务:确保 WorkManager 周期 tick 在跑。
         try { CronScheduler.ensureScheduled(this) } catch (e: Exception) {
             Log.w("HsucodeApp", "cron schedule failed: ${e.message}")
@@ -519,6 +562,8 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         agentChatState.thinkingLevel = thinkingLevel
         darkMode = runBlocking { database.settingDao().get("dark_mode")?.toBooleanStrictOrNull() ?: false }
         enterToSend = runBlocking { database.settingDao().get("enter_to_send")?.toBooleanStrictOrNull() ?: true }
+        rootModeEnabled = runBlocking { database.settingDao().get("root_mode_enabled")?.toBooleanStrictOrNull() ?: false }
+        WorkspaceRuntime.setRootModeEnabled(rootModeEnabled)
         // 联网搜索总开关:默认【关闭】,不打开就不能联网获取信息。加载持久化值。
         com.hsucode.tools.WebSearchGate.enabled = runBlocking { database.settingDao().get("web_search_enabled")?.toBooleanStrictOrNull() ?: false }
         // Ensure enabledModelIds has at least the active model
@@ -1105,7 +1150,7 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
             val pid = session?.projectId ?: 0L
             val projectRoot = if (pid > 0L) database.projectDao().getById(pid)?.workspaceRoot?.takeIf { it.isNotBlank() } else null
             val globalRoot = database.settingDao().get("workspace_root")?.takeIf { it.isNotBlank() }
-            val root = projectRoot ?: globalRoot ?: com.hsucode.tools.WorkspaceContext.DEFAULT_ROOT
+            val root = projectRoot ?: globalRoot ?: com.hsucode.tools.WorkspaceContext.defaultRoot
             // 全局兜底(设置显示/无 per-session 上下文的后台核用)。
             com.hsucode.tools.WorkspaceContext.projectId = pid
             com.hsucode.tools.WorkspaceContext.workspaceRoot = root
@@ -1184,7 +1229,7 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
             // 等「动手」工具——弱模型再也没法绕过派活自己搜。但仅在【确实配置了子智能体】时才收窄,否则主脑
             // 无手可用会卡死,此时退回软提示。
             applicationScope.launch(Dispatchers.IO) {
-                val hasSub = try { database.subAgentDao().getAll().isNotEmpty() } catch (_: Exception) { false }
+                val hasSub = try { database.subAgentDao().getAll().any { it.enabled } } catch (_: Exception) { false }
                 toolRegistry.collabAllowlist = if (hasSub) COLLAB_BRAIN_TOOLS else emptySet()
                 withContext(Dispatchers.Main) { sessionPool.values.forEach { it.chat.invalidateSystemPrompt() } }
             }
@@ -1196,6 +1241,18 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         val p = path.trim().ifBlank { return }
         _active?.chat?.let { it.sessionWorkspaceRoot = p.trimEnd('/') }
         com.hsucode.tools.WorkspaceContext.workspaceRoot = p
+    }
+
+    /** User-initiated single-agent run from the agent center. */
+    fun runSubAgent(agentName: String, task: String) {
+        applicationScope.launch(Dispatchers.IO) {
+            subAgentTool.runDirect(agentName, task)
+        }
+    }
+
+    /** Makes a changed global prompt take effect on the next send in every live session. */
+    fun invalidateAllSystemPrompts() {
+        sessionPool.values.forEach { it.chat.invalidateSystemPrompt() }
     }
 
     /** 设置项目独立工作目录(AI 产出/写入的默认根;仍可读目录之外)。立即对当前会话重算生效根。 */
@@ -1295,6 +1352,11 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
                 currentModelLabel = modelId
             }
         }
+    }
+
+    /** Keeps the visible model indicator aligned with an explicit routing selection. */
+    fun updateCurrentModelLabel(modelId: String) {
+        if (modelId.isNotBlank()) currentModelLabel = modelId
     }
 
     fun updateThinkingEnabled(enabled: Boolean) {
@@ -1424,6 +1486,14 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         enterToSend = enabled
         applicationScope.launch(Dispatchers.IO) {
             database.settingDao().put("enter_to_send", enabled.toString())
+        }
+    }
+
+    fun updateRootModeEnabled(enabled: Boolean) {
+        rootModeEnabled = enabled
+        WorkspaceRuntime.setRootModeEnabled(enabled)
+        applicationScope.launch(Dispatchers.IO) {
+            database.settingDao().put("root_mode_enabled", enabled.toString())
         }
     }
 

@@ -10,6 +10,8 @@ import androidx.room.PrimaryKey
  * - [skillNames]:它的**专属技能**(逗号分隔)。派活时只把这些技能注入它的系统提示,
  *   让它据任务从【自己这套】里选,而非盲目从全量技能里挑。
  * - [toolNames]:它能用的工具白名单(逗号分隔;空=只读安全工具集)。
+ * - [enabled]:停用的智能体不会出现在主脑的可调度清单中,也不能被直接派发。
+ * - [temperature]:每个智能体有独立采样温度,让审查/执行角色保持稳健,创作角色保留发散空间。
  */
 @Entity(tableName = "sub_agents")
 data class SubAgentEntity(
@@ -21,6 +23,9 @@ data class SubAgentEntity(
     val skillNames: String = "",
     val toolNames: String = "",
     val builtin: Boolean = false,
+    val avatar: String = "agent",
+    val enabled: Boolean = true,
+    val temperature: Float = 0.7f,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

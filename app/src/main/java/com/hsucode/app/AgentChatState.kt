@@ -135,7 +135,7 @@ class AgentChatState(
         return try {
             val json = org.json.JSONObject(arguments)
             when (toolName) {
-                "shell_exec", "su_exec" -> json.optString("command", arguments).take(60)
+                "shell_exec", "su_exec", "env_exec" -> json.optString("command", arguments).take(60)
                 "file_read", "file_write" -> json.optString("path", arguments)
                 "web_search" -> "\"${json.optString("query", arguments).take(40)}\""
                 "web_fetch" -> json.optString("url", arguments)
@@ -245,7 +245,7 @@ class AgentChatState(
 
     private fun extractCommand(toolName: String, arguments: String): String {
         return when (toolName) {
-            "shell_exec", "su_exec" -> {
+            "shell_exec", "su_exec", "env_exec" -> {
                 try { org.json.JSONObject(arguments).optString("command", arguments) } catch (_: Exception) { arguments }
             }
             "file_read", "file_write" -> {
@@ -297,7 +297,7 @@ class AgentChatState(
 
     private fun extractConfirmCommand(cmd: GateCommand): String {
         return when (cmd.toolName) {
-            "shell_exec", "su_exec" -> {
+            "shell_exec", "su_exec", "env_exec" -> {
                 try { org.json.JSONObject(cmd.toolArgs).optString("command", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
             }
             "file_read", "file_write" -> {
@@ -592,7 +592,9 @@ class AgentChatState(
                         val curatedUser = try { database.settingDao().get(CuratedMemory.keyFor("user")) } catch (_: Exception) { null }
                         val curatedSituation = try { database.settingDao().get(CuratedMemory.keyFor("memory")) } catch (_: Exception) { null }
                         val subAgents = try {
-                            database.subAgentDao().getAll().map { it.name to it.description }
+                            database.subAgentDao().getAll()
+                                .filter { it.enabled }
+                                .map { it.name to it.description }
                         } catch (_: Exception) { emptyList() }
                         // 跨对话记忆摘要:把当前范围(普通对话=全局共享池 pid=0;项目内=本项目)里【其它对话】
                         // 自动沉淀的记忆要点(标题即首句)按时间倒序摘一小段进系统提示,让模型天然有"大概记忆",

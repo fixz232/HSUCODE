@@ -37,6 +37,17 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <provider
+            android:name=".HsucodeDocumentsProvider"
+            android:authorities="com.hsucode.app.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+
         <receiver
             android:name=".HsucodeWidgetReceiver"
             android:exported="true">

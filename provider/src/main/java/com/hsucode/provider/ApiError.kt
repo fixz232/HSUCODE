@@ -28,7 +28,7 @@ sealed class ApiError(
     class ParseError(cause: Throwable? = null) : ApiError("响应解析异常", cause)
 
     /** 5xx — server-side failure */
-    class ServerError(code: Int, cause: Throwable? = null) : ApiError("服务器错误 ($code)", cause)
+    class ServerError(val code: Int, cause: Throwable? = null) : ApiError("服务器错误 ($code)", cause)
 
     /**
      * 4xx(400/404/422 等)——请求本身被供应商拒绝。

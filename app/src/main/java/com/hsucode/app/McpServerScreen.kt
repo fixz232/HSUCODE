@@ -17,6 +17,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hsucode.data.McpServerEntity
 import kotlinx.coroutines.launch
+import android.content.Intent
+import android.net.Uri
+import com.hsucode.provider.McpOAuthClient
+import com.hsucode.provider.McpSessionRegistry
 
 @Composable
 fun McpServerScreen(mcpManager: McpManager, onBack: () -> Unit) {
@@ -24,9 +28,11 @@ fun McpServerScreen(mcpManager: McpManager, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var servers by remember { mutableStateOf<List<McpServerEntity>>(emptyList()) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showOAuthDialog by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<McpServerEntity?>(null) }
     var busyId by remember { mutableStateOf<Long?>(null) }
     var status by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    val sessionStates by mcpManager.sessionRegistry.states.collectAsState()
 
     fun refresh() {
         scope.launch { servers = mcpManager.getAllServers() }
@@ -45,6 +51,7 @@ fun McpServerScreen(mcpManager: McpManager, onBack: () -> Unit) {
             ) {
                 IconButton(onClick = onBack) { Icon(Icons.Outlined.ArrowBack, "返回") }
                 Text("MCP 服务器", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                IconButton(onClick = { showOAuthDialog = true }) { Icon(Icons.Outlined.Lock, "OAuth 授权") }
                 IconButton(onClick = { showAddDialog = true }) { Icon(Icons.Outlined.Add, "添加 HTTP 服务器") }
             }
         }
@@ -91,6 +98,7 @@ fun McpServerScreen(mcpManager: McpManager, onBack: () -> Unit) {
             McpServerRow(
                 server = server,
                 busy = busyId == server.id,
+                sessionState = sessionStates[if (server.transport == "stdio") "stdio:${server.name}" else "http:${server.url}"],
                 onConnectToggle = {
                     if (busyId != null) return@McpServerRow
                     busyId = server.id
@@ -130,6 +138,20 @@ fun McpServerScreen(mcpManager: McpManager, onBack: () -> Unit) {
             }
         )
     }
+    if (showOAuthDialog) {
+        McpOAuthDialog(
+            mcpManager = mcpManager,
+            onDismiss = { showOAuthDialog = false },
+            onResult = { result ->
+                showOAuthDialog = false
+                status = when (result) {
+                    is McpConnectResult.Success -> "OAuth 已连接 ${result.serverName}，发现 ${result.toolCount} 个工具" to false
+                    is McpConnectResult.Error -> result.message to true
+                }
+                refresh()
+            }
+        )
+    }
     deleteTarget?.let { server ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
@@ -152,7 +174,69 @@ fun McpServerScreen(mcpManager: McpManager, onBack: () -> Unit) {
 }
 
 @Composable
-private fun McpServerRow(server: McpServerEntity, busy: Boolean, onConnectToggle: () -> Unit, onDelete: () -> Unit) {
+private fun McpOAuthDialog(
+    mcpManager: McpManager,
+    onDismiss: () -> Unit,
+    onResult: (McpConnectResult) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var name by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    var deviceEndpoint by remember { mutableStateOf("") }
+    var tokenEndpoint by remember { mutableStateOf("") }
+    var clientId by remember { mutableStateOf("") }
+    var scopeText by remember { mutableStateOf("") }
+    var device by remember { mutableStateOf<McpOAuthClient.DeviceCode?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    fun open(urlText: String) { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(urlText))) } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("MCP OAuth 设备授权") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("服务器名称") })
+                OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("MCP URL") })
+                OutlinedTextField(deviceEndpoint, { deviceEndpoint = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("device code endpoint") })
+                OutlinedTextField(tokenEndpoint, { tokenEndpoint = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("token endpoint") })
+                OutlinedTextField(clientId, { clientId = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("OAuth client_id") })
+                OutlinedTextField(scopeText, { scopeText = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("scope（可选）") })
+                device?.let { code ->
+                    Text("用户码：${code.userCode.ifBlank { "请在浏览器确认" }}", style = MaterialTheme.typography.bodyMedium)
+                    TextButton(onClick = { open(code.verificationUri) }, enabled = code.verificationUri.isNotBlank()) { Text("打开授权页面") }
+                }
+                if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !busy && name.isNotBlank() && url.isNotBlank() && deviceEndpoint.isNotBlank() && tokenEndpoint.isNotBlank() && clientId.isNotBlank(), onClick = {
+                if (busy) return@TextButton
+                busy = true; error = ""
+                scope.launch {
+                    if (device == null) {
+                        mcpManager.requestOAuthDeviceCode(deviceEndpoint.trim(), clientId.trim(), scopeText.trim()).fold(
+                            onSuccess = { code -> device = code; open(code.verificationUri); busy = false },
+                            onFailure = { error = it.message.orEmpty(); busy = false }
+                        )
+                    } else {
+                        mcpManager.pollOAuthToken(tokenEndpoint.trim(), clientId.trim(), device!!).fold(
+                            onSuccess = { token ->
+                                val result = mcpManager.connectServer(name.trim(), url.trim(), "Bearer $token")
+                                onResult(result)
+                            },
+                            onFailure = { error = it.message.orEmpty(); busy = false }
+                        )
+                    }
+                }
+            }) { Text(if (device == null) "获取设备码" else if (busy) "连接中…" else "授权并连接") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") } }
+    )
+}
+
+@Composable
+private fun McpServerRow(server: McpServerEntity, busy: Boolean, sessionState: McpSessionRegistry.SessionState?, onConnectToggle: () -> Unit, onDelete: () -> Unit) {
     val colors = LocalHsuColors.current
     val endpoint = if (server.transport == "stdio") {
         (server.command + " " + server.argsJson).trim()
@@ -182,12 +266,19 @@ private fun McpServerRow(server: McpServerEntity, busy: Boolean, onConnectToggle
                 AssistChip(
                     onClick = {},
                     enabled = false,
-                    label = { Text(if (server.connected) "已连接" else "未连接") },
+                    label = { Text(when (sessionState?.status) {
+                        McpSessionRegistry.Status.RECONNECTING -> "重连中"
+                        McpSessionRegistry.Status.CONNECTING -> "连接中"
+                        McpSessionRegistry.Status.ERROR -> "异常"
+                        McpSessionRegistry.Status.CONNECTED -> "已连接"
+                        else -> if (server.connected) "已连接" else "未连接"
+                    }) },
                     leadingIcon = {
+                        val connectedNow = sessionState?.status == McpSessionRegistry.Status.CONNECTED || (sessionState == null && server.connected)
                         Icon(
-                            if (server.connected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                            if (connectedNow) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
                             null, modifier = Modifier.size(16.dp),
-                            tint = if (server.connected) colors.green else colors.faint
+                            tint = if (connectedNow) colors.green else colors.faint
                         )
                     }
                 )
@@ -200,6 +291,9 @@ private fun McpServerRow(server: McpServerEntity, busy: Boolean, onConnectToggle
                     color = colors.sub,
                     modifier = Modifier.padding(start = 30.dp, top = 4.dp)
                 )
+            }
+            if (sessionState?.message?.isNotBlank() == true) {
+                Text(sessionState.message.take(120), style = MaterialTheme.typography.bodySmall, color = colors.sub, modifier = Modifier.padding(start = 30.dp, top = 2.dp))
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onConnectToggle, enabled = !busy) {

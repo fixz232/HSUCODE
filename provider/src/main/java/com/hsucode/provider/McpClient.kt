@@ -42,6 +42,13 @@ class McpClient(
     @Volatile
     private var mcpSessionId: String? = null
 
+    @Volatile
+    var lastContentType: String = ""
+        private set
+
+    /** True after the server advertises the persistent Streamable HTTP session header. */
+    val isStreamableHttp: Boolean get() = !mcpSessionId.isNullOrBlank()
+
     /**
      * Initialize connection with the MCP server (handshake).
      * Sends initialize + initialized notification per MCP spec.
@@ -177,6 +184,38 @@ class McpClient(
         initialized = false
     }
 
+    /** Reads an MCP SSE response incrementally for servers that stream progress/events. */
+    suspend fun streamRequest(payload: JSONObject, onEvent: (JSONObject) -> Unit): Result<JSONObject?> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder()
+                .url(serverUrl)
+                .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream, application/json")
+                .apply {
+                    if (authHeader.isNotBlank()) header("Authorization", authHeader)
+                    mcpSessionId?.let { header("Mcp-Session-Id", it) }
+                }
+                .build()
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw McpException("MCP HTTP ${response.code}")
+                response.header("Mcp-Session-Id")?.takeIf { it.isNotBlank() }?.let { mcpSessionId = it }
+                lastContentType = response.header("Content-Type").orEmpty()
+                val source = response.body?.source() ?: throw McpException("MCP: empty stream")
+                var last: JSONObject? = null
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    val data = line.trim().removePrefix("data:").trim()
+                    if (data.isBlank() || data == "[DONE]") continue
+                    val event = runCatching { JSONObject(data) }.getOrNull() ?: continue
+                    last = event
+                    onEvent(event)
+                }
+                last
+            }
+        }
+    }
+
     override fun close() = disconnect()
 
     // ---- internals ----
@@ -198,13 +237,17 @@ class McpClient(
             }
             .build()
 
-        val response = okHttpClient.newCall(request).execute()
-        // gap-23:捕获服务端下发的会话 ID(streamable-http 持久会话)。
-        response.header("Mcp-Session-Id")?.let { if (it.isNotBlank()) mcpSessionId = it }
-        val responseBody = response.body?.string() ?: throw McpException("MCP: empty response body")
+        okHttpClient.newCall(request).execute().use { response ->
+            // gap-23:捕获服务端下发的会话 ID(streamable-http 持久会话)。
+            response.header("Mcp-Session-Id")?.let { if (it.isNotBlank()) mcpSessionId = it }
+            lastContentType = response.header("Content-Type").orEmpty()
+            if (!response.isSuccessful) throw McpException("MCP HTTP ${response.code}")
+            val responseBody = response.body?.string() ?: throw McpException("MCP: empty response body")
 
-        // MCP servers may return SSE or plain JSON
-        return parseResponse(responseBody)
+            // MCP servers may return SSE or plain JSON. The response must be closed
+            // here so repeated tool calls do not exhaust OkHttp's connection pool.
+            return parseResponse(responseBody)
+        }
     }
 
     /** Send a notification (fire-and-forget, no response expected). */
@@ -238,16 +281,22 @@ class McpClient(
             return JSONObject(trimmed)
         }
 
-        // Try SSE format: extract JSON from "data: ..." lines
+        // Try SSE format. Progress events can precede the JSON-RPC result, so prefer
+        // the event carrying `result`/`error` and only fall back to the last event.
+        var lastEvent: JSONObject? = null
         for (line in trimmed.lines()) {
             val dataLine = line.trim()
-            if (dataLine.startsWith("data: ")) {
-                val jsonStr = dataLine.removePrefix("data: ").trim()
+            if (dataLine.startsWith("data:")) {
+                val jsonStr = dataLine.removePrefix("data:").trim()
                 if (jsonStr.startsWith("{")) {
-                    return JSONObject(jsonStr)
+                    val event = runCatching { JSONObject(jsonStr) }.getOrNull() ?: continue
+                    lastEvent = event
+                    if (event.has("result") || event.has("error")) return event
                 }
             }
         }
+
+        lastEvent?.let { return it }
 
         throw McpException("MCP: cannot parse response: ${body.take(200)}")
     }

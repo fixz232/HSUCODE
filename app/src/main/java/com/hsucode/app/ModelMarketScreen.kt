@@ -7,10 +7,26 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Clear
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -35,6 +51,9 @@ import com.hsucode.security.KeystoreProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val Mono = FontFamily(Font(R.font.jetbrains_mono, FontWeight.Normal))
 
@@ -193,48 +212,155 @@ fun ModelMarketScreen(
     database: AppDatabase,
     keystore: KeystoreProvider,
     openAiClient: com.hsucode.provider.OpenAiClient,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    showHeader: Boolean = true
 ) {
     val xc = LocalHsuColors.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var keyDialogFor by remember { mutableStateOf<ProviderPreset?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
+    var configs by remember { mutableStateOf<List<ProviderConfigEntity>>(emptyList()) }
+    var metadata by remember { mutableStateOf<List<ModelMetadata>>(emptyList()) }
+    var recentUse by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var modelQuery by remember { mutableStateOf("") }
+    var modelFilter by remember { mutableStateOf("全部") }
+    var marketQuery by remember { mutableStateOf("") }
+    var marketFilter by remember { mutableStateOf("全部") }
+    var editingMetadata by remember { mutableStateOf<ModelMetadata?>(null) }
+
+    fun reloadLibrary() {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                configs = database.providerConfigDao().getAll()
+                metadata = ModelMetadataStore.getAll(database)
+                recentUse = database.usageRecordDao().recentByModel().associate { it.model to it.lastUsed }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { reloadLibrary() }
+    LaunchedEffect(keyDialogFor) { if (keyDialogFor == null) reloadLibrary() }
 
     fun openSite(url: String) {
         try { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
     }
 
+    val freeList = ProviderPresets.ALL.filter { it.free }
+    val planList = ProviderPresets.ALL.filter { it.plan }
+    val payList = ProviderPresets.ALL.filter { !it.free && !it.plan }
+    val filteredMarket = ProviderPresets.ALL.filter { preset ->
+        val matchesQuery = marketQuery.isBlank() || preset.name.contains(marketQuery, true) ||
+            preset.note.contains(marketQuery, true) || preset.supplierId.contains(marketQuery, true)
+        val matchesFilter = when (marketFilter) {
+            "免费" -> preset.free
+            "套餐" -> preset.plan
+            "本地" -> preset.baseUrl.startsWith("http://localhost") || preset.baseUrl.contains("127.0.0.1")
+            "Anthropic" -> preset.apiPathType == "anthropic"
+            "国内" -> marketRegion(preset) == "国内"
+            "国际" -> marketRegion(preset) == "国际"
+            else -> true
+        }
+        matchesQuery && matchesFilter
+    }
+    val configuredRows = configs.flatMap { cfg ->
+        (cfg.enabledModelIds + cfg.model).filter { it.isNotBlank() }.distinct().map { modelId ->
+            Triple(cfg, modelId, metadata.firstOrNull { it.configId == cfg.id && it.modelId == modelId })
+        }
+    }.filter { row ->
+        val (cfg, modelId, stored) = row
+        val matchesQuery = modelId.contains(modelQuery, true) || cfg.name.contains(modelQuery, true)
+        val matchesFilter = when (modelFilter) {
+            "收藏" -> stored?.favorite == true
+            "ToolCall" -> stored?.supportsToolCall ?: cfg.supportsToolCall
+            "视觉" -> stored?.supportsVision ?: cfg.supportsVision
+            "本地" -> stored?.isLocal ?: (cfg.baseUrl.contains("localhost") || cfg.baseUrl.contains("127.0.0.1"))
+            else -> true
+        }
+        matchesQuery && matchesFilter
+    }.sortedWith(compareBy({ it.third?.sortOrder ?: Int.MAX_VALUE }, { it.second }))
+
     Column(Modifier.fillMaxSize().background(xc.bg)) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("‹ 返回", fontSize = 13.sp, fontFamily = Mono, color = xc.sub,
-                modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onBack() })
-            Spacer(Modifier.weight(1f))
-            Text("免费模型 / 供应商", fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = Mono, color = xc.ink)
-            Spacer(Modifier.weight(1f))
+        if (showHeader) Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回", tint = xc.ink) }
+            Text("模型中心 · 模型", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = xc.ink, modifier = Modifier.weight(1f))
         }
         toast?.let {
-            Text(it, fontSize = 11.sp, fontFamily = Mono, color = xc.green, modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp))
+            Text(it, fontSize = 11.sp, color = xc.green, modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp))
         }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            // 三区:免费额度 / 订阅套餐(plan) / 按量付费。列表在外部先算好,避免在 items 里反复 filter。
-            val freeList = ProviderPresets.ALL.filter { it.free }
-            val planList = ProviderPresets.ALL.filter { it.plan }
-            val payList = ProviderPresets.ALL.filter { !it.free && !it.plan }
-
-            item { SectionLabel("免费 / 免费额度(自己注册领 key,每日有额度或限速)", xc) }
-            items(freeList.size) { i ->
-                val p = freeList[i]
-                PresetCard(p, xc, onSite = { openSite(p.site) }, onAdd = { keyDialogFor = p })
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item {
+                Text("模型信息库", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = xc.ink)
+                Text("能力、上下文、价格和健康状态按模型保存；未覆盖时沿用供应商声明。", fontSize = 11.sp, color = xc.sub, modifier = Modifier.padding(top = 3.dp, bottom = 8.dp))
+                OutlinedTextField(
+                    value = modelQuery, onValueChange = { modelQuery = it }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(), placeholder = { Text("搜索已配置模型或供应商") },
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                    trailingIcon = { if (modelQuery.isNotEmpty()) IconButton(onClick = { modelQuery = "" }) { Icon(Icons.Outlined.Clear, contentDescription = "清除") } },
+                    shape = RoundedCornerShape(8.dp)
+                )
+                LazyRow(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(listOf("全部", "收藏", "ToolCall", "视觉", "本地")) { label ->
+                        FilterChip(selected = modelFilter == label, onClick = { modelFilter = label }, label = { Text(label, fontSize = 11.sp) })
+                    }
+                }
             }
-            item { Spacer(Modifier.height(6.dp)); SectionLabel("订阅套餐 Plan(按月订阅,非按量计费)", xc) }
-            items(planList.size) { i ->
-                val p = planList[i]
-                PresetCard(p, xc, onSite = { openSite(p.site) }, onAdd = { keyDialogFor = p })
+            if (configuredRows.isEmpty()) {
+                item { Text("还没有已配置模型，请在下方供应商目录添加一个。", fontSize = 12.sp, color = xc.sub, modifier = Modifier.padding(vertical = 8.dp)) }
+            } else {
+                items(configuredRows.size) { i ->
+                    val (cfg, modelId, stored) = configuredRows[i]
+                    val base = stored ?: ModelMetadata(
+                        configId = cfg.id, modelId = modelId, contextWindow = cfg.contextWindow,
+                        supportsToolCall = cfg.supportsToolCall, supportsVision = cfg.supportsVision,
+                        supportsAudio = cfg.supportsAudio, status = if (cfg.isActive && cfg.model == modelId) "当前主模型" else "已配置",
+                        isLocal = cfg.baseUrl.contains("localhost") || cfg.baseUrl.contains("127.0.0.1")
+                    )
+                    ModelInfoRow(base, cfg.name, cfg.isActive && cfg.model == modelId, recentUse[modelId] ?: 0L, xc,
+                        onFavorite = {
+                            scope.launch { withContext(Dispatchers.IO) { ModelMetadataStore.upsert(database, base.copy(favorite = !base.favorite)) }; reloadLibrary() }
+                        }, onEdit = { editingMetadata = base },
+                        onMoveUp = {
+                            val index = configuredRows.indexOfFirst { it.first.id == cfg.id && it.second == modelId }
+                            if (index > 0) scope.launch { withContext(Dispatchers.IO) {
+                                val order = configuredRows.map { it.first.id to it.second }.toMutableList()
+                                val item = order.removeAt(index); order.add(index - 1, item); ModelMetadataStore.saveOrder(database, order)
+                            }; reloadLibrary() }
+                        }, onMoveDown = {
+                            val index = configuredRows.indexOfFirst { it.first.id == cfg.id && it.second == modelId }
+                            if (index >= 0 && index < configuredRows.lastIndex) scope.launch { withContext(Dispatchers.IO) {
+                                val order = configuredRows.map { it.first.id to it.second }.toMutableList()
+                                val item = order.removeAt(index); order.add(index + 1, item); ModelMetadataStore.saveOrder(database, order)
+                            }; reloadLibrary() }
+                        }, onDrag = { delta ->
+                            val index = configuredRows.indexOfFirst { it.first.id == cfg.id && it.second == modelId }
+                            val next = if (delta < 0) index - 1 else index + 1
+                            if (index >= 0 && next in configuredRows.indices) scope.launch { withContext(Dispatchers.IO) {
+                                val order = configuredRows.map { it.first.id to it.second }.toMutableList()
+                                val item = order.removeAt(index); order.add(next, item); ModelMetadataStore.saveOrder(database, order)
+                            }; reloadLibrary() }
+                        })
+                }
             }
-            item { Spacer(Modifier.height(6.dp)); SectionLabel("按量付费(购买 API 额度)", xc) }
-            items(payList.size) { i ->
-                val p = payList[i]
+            item {
+                Spacer(Modifier.height(8.dp))
+                Text("供应商目录", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = xc.ink)
+                Text("预置端点用于快速开始；添加后仍可在供应商页调整模型和能力。", fontSize = 11.sp, color = xc.sub, modifier = Modifier.padding(top = 3.dp, bottom = 8.dp))
+                OutlinedTextField(
+                    value = marketQuery, onValueChange = { marketQuery = it }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(), placeholder = { Text("搜索供应商、协议或用途") },
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                    trailingIcon = { if (marketQuery.isNotEmpty()) IconButton(onClick = { marketQuery = "" }) { Icon(Icons.Outlined.Clear, contentDescription = "清除") } },
+                    shape = RoundedCornerShape(8.dp)
+                )
+                LazyRow(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(listOf("全部", "免费", "套餐", "本地", "国内", "国际", "Anthropic")) { label ->
+                        FilterChip(selected = marketFilter == label, onClick = { marketFilter = label }, label = { Text(label, fontSize = 11.sp) })
+                    }
+                }
+            }
+            val displayPresets = if (marketQuery.isNotBlank() || marketFilter != "全部") filteredMarket else freeList + planList + payList
+            items(displayPresets.size) { i ->
+                val p = displayPresets[i]
                 PresetCard(p, xc, onSite = { openSite(p.site) }, onAdd = { keyDialogFor = p })
             }
         }
@@ -255,11 +381,12 @@ fun ModelMarketScreen(
         // Nous / Ollama 这类干脆是空的 —— 不给拉取入口的话,用户根本不知道该填什么。
         var fetched by remember(p) { mutableStateOf<List<String>>(emptyList()) }
         var fetching by remember(p) { mutableStateOf(false) }
+        val isLocalPreset = p.baseUrl.startsWith("http://localhost") || p.baseUrl.contains("127.0.0.1")
 
         /** 用当前已有的凭据拉一次模型列表。token 为空时回落到输入框里的 key。 */
         fun fetchModels(tokenOverride: String = "") {
             val k = tokenOverride.ifBlank { key.trim() }
-            if (k.isBlank()) { toast = "先填 API Key 再拉取"; return }
+            if (k.isBlank() && !isLocalPreset) { toast = "先填 API Key 再拉取"; return }
             fetching = true; toast = "正在拉取模型列表…"
             scope.launch {
                 val r = openAiClient.listModels(p.baseUrl, k)
@@ -300,7 +427,7 @@ fun ModelMarketScreen(
                         Text("官网注册领取 API Key ›", fontSize = 12.sp, fontFamily = Mono, color = xc.green,
                             modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { openSite(p.site) })
                         Spacer(Modifier.height(10.dp))
-                        TField(key, { key = it }, "粘贴 API Key", xc)
+                        TField(key, { key = it }, if (isLocalPreset) "本地服务通常无需 API Key" else "粘贴 API Key", xc)
                         Spacer(Modifier.height(8.dp))
                         TField(model, { model = it }, "模型 ID(可改)", xc)
                     }
@@ -421,10 +548,10 @@ fun ModelMarketScreen(
                     }
 
                     val k = key.trim(); val m = model.trim()
-                    if (k.isBlank() || m.isBlank()) { toast = "请填 key 和模型"; return@TextButton }
+                    if ((!isLocalPreset && k.isBlank()) || m.isBlank()) { toast = if (isLocalPreset) "请填写模型 ID" else "请填 key 和模型"; return@TextButton }
                     scope.launch {
                         withContext(Dispatchers.IO) {
-                            val enc = android.util.Base64.encodeToString(keystore.encrypt(k), android.util.Base64.NO_WRAP)
+                            val enc = if (k.isBlank()) "" else android.util.Base64.encodeToString(keystore.encrypt(k), android.util.Base64.NO_WRAP)
                             database.providerConfigDao().deactivateAll()
                             val id = database.providerConfigDao().insert(
                                 ProviderConfigEntity(
@@ -456,6 +583,21 @@ fun ModelMarketScreen(
             containerColor = xc.bg
         )
     }
+
+    editingMetadata?.let { current ->
+        ModelInfoDialog(
+            current = current,
+            xc = xc,
+            onDismiss = { editingMetadata = null },
+            onSave = { updated ->
+                scope.launch {
+                    withContext(Dispatchers.IO) { ModelMetadataStore.upsert(database, updated) }
+                    editingMetadata = null
+                    reloadLibrary()
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -463,10 +605,143 @@ private fun SectionLabel(text: String, xc: HsuColors) {
     Text(text, fontSize = 11.sp, fontFamily = Mono, color = xc.faint, modifier = Modifier.padding(vertical = 2.dp))
 }
 
+private fun marketRegion(preset: ProviderPreset): String = when {
+    preset.baseUrl.startsWith("http://localhost") || preset.baseUrl.contains("127.0.0.1") -> "本地"
+    preset.baseUrl.contains(".cn") || preset.name.contains("国内") -> "国内"
+    else -> "国际"
+}
+
+@Composable
+private fun ModelInfoRow(
+    metadata: ModelMetadata,
+    providerName: String,
+    active: Boolean,
+    lastUsedAt: Long,
+    xc: HsuColors,
+    onFavorite: () -> Unit,
+    onEdit: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDrag: (Float) -> Unit
+) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(xc.bgElevated)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onEdit() }
+            .pointerInput(metadata.configId, metadata.modelId) {
+                var totalY = 0f
+                var moved = false
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { totalY = 0f; moved = false },
+                    onDrag = { change, amount ->
+                        change.consume(); totalY += amount.y
+                        if (!moved && kotlin.math.abs(totalY) >= 28f) { moved = true; onDrag(totalY) }
+                    }
+                )
+            }
+            .padding(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(metadata.modelId, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = xc.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(providerName, fontSize = 11.sp, color = xc.sub, modifier = Modifier.padding(top = 2.dp))
+            }
+            if (active) StatusBadge("主模型", xc.green, xc)
+            if (lastUsedAt > 0L) StatusBadge("最近使用", xc.green, xc)
+            if (metadata.isLocal) StatusBadge("本地", xc.yellow, xc)
+            if (metadata.region.isNotBlank()) StatusBadge(metadata.region, xc.sub, xc)
+            IconButton(onClick = onFavorite, modifier = Modifier.size(48.dp)) {
+                Icon(if (metadata.favorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                    contentDescription = if (metadata.favorite) "取消收藏" else "收藏", tint = if (metadata.favorite) xc.red else xc.sub)
+            }
+            Column {
+                IconButton(onClick = onMoveUp, modifier = Modifier.size(48.dp)) { Icon(Icons.Outlined.KeyboardArrowUp, "上移", tint = xc.sub) }
+                IconButton(onClick = onMoveDown, modifier = Modifier.size(48.dp)) { Icon(Icons.Outlined.KeyboardArrowDown, "下移", tint = xc.sub) }
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (metadata.contextWindow > 0) StatusBadge("上下文 ${metadata.contextWindow / 1000}k", xc.sub, xc)
+            if (metadata.supportsToolCall) StatusBadge("ToolCall", xc.green, xc)
+            if (metadata.supportsVision) StatusBadge("视觉", xc.green, xc)
+            if (metadata.supportsAudio) StatusBadge("音频", xc.green, xc)
+            if (metadata.supportsReasoning) StatusBadge("推理", xc.green, xc)
+        }
+        val price = listOfNotNull(
+            metadata.inputPricePerMillion?.let { "入 $it" },
+            metadata.outputPricePerMillion?.let { "出 $it" }
+        ).joinToString(" / ")
+        if (price.isNotBlank()) Text("每百万 Token · $price", fontSize = 10.sp, color = xc.sub, modifier = Modifier.padding(top = 6.dp))
+        val updated = if (metadata.sourceUpdatedAt > 0) " · 更新 ${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(metadata.sourceUpdatedAt))}" else ""
+        Text("状态：${metadata.status}$updated · 点击编辑模型资料", fontSize = 10.sp, color = xc.faint, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+@Composable
+private fun StatusBadge(label: String, color: Color, xc: HsuColors) {
+    Box(Modifier.clip(RoundedCornerShape(6.dp)).background(color.copy(alpha = if (xc.isDark) 0.22f else 0.12f)).padding(horizontal = 6.dp, vertical = 3.dp)) {
+        Text(label, fontSize = 9.sp, color = color, maxLines = 1)
+    }
+}
+
+@Composable
+private fun ModelInfoDialog(
+    current: ModelMetadata,
+    xc: HsuColors,
+    onDismiss: () -> Unit,
+    onSave: (ModelMetadata) -> Unit
+) {
+    var contextWindow by remember(current) { mutableStateOf(if (current.contextWindow > 0) current.contextWindow.toString() else "") }
+    var inputPrice by remember(current) { mutableStateOf(current.inputPricePerMillion?.toString().orEmpty()) }
+    var outputPrice by remember(current) { mutableStateOf(current.outputPricePerMillion?.toString().orEmpty()) }
+    var region by remember(current) { mutableStateOf(current.region) }
+    var toolCall by remember(current) { mutableStateOf(current.supportsToolCall) }
+    var vision by remember(current) { mutableStateOf(current.supportsVision) }
+    var audio by remember(current) { mutableStateOf(current.supportsAudio) }
+    var reasoning by remember(current) { mutableStateOf(current.supportsReasoning) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = xc.bg,
+        title = { Text("编辑模型资料", color = xc.ink) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(current.modelId, fontSize = 12.sp, color = xc.sub)
+                OutlinedTextField(contextWindow, { contextWindow = it }, label = { Text("上下文窗口 tokens") }, singleLine = true)
+                OutlinedTextField(inputPrice, { inputPrice = it }, label = { Text("输入价格 / 百万 Token") }, singleLine = true)
+                OutlinedTextField(outputPrice, { outputPrice = it }, label = { Text("输出价格 / 百万 Token") }, singleLine = true)
+                OutlinedTextField(region, { region = it }, label = { Text("地区 / 节点（可选）") }, singleLine = true)
+                CapabilityEditor("支持 ToolCall", toolCall) { toolCall = it }
+                CapabilityEditor("支持视觉", vision) { vision = it }
+                CapabilityEditor("支持音频", audio) { audio = it }
+                CapabilityEditor("支持推理", reasoning) { reasoning = it }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onSave(current.copy(
+                    contextWindow = contextWindow.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                    inputPricePerMillion = inputPrice.toDoubleOrNull(), outputPricePerMillion = outputPrice.toDoubleOrNull(),
+                    supportsToolCall = toolCall, supportsVision = vision, supportsAudio = audio, supportsReasoning = reasoning,
+                    region = region.trim(), sourceUpdatedAt = System.currentTimeMillis(), status = "已手动确认"
+                ))
+            }) { Text("保存", color = xc.green) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消", color = xc.sub) } }
+    )
+}
+
+@Composable
+private fun CapabilityEditor(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.weight(1f), fontSize = 12.sp)
+        androidx.compose.material3.Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
 @Composable
 private fun PresetCard(p: ProviderPreset, xc: HsuColors, onSite: () -> Unit, onAdd: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(xc.bgElevated).padding(16.dp)) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(xc.bgElevated).padding(14.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            ProviderLogo(p.supplierId, p.name, logoSize = 56.dp)
+            Spacer(Modifier.width(10.dp))
             Text(p.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = Mono, color = xc.ink, modifier = Modifier.weight(1f))
             val (badge, bc) = when {
                 p.free -> "免费" to xc.green
@@ -492,9 +767,9 @@ private fun PresetCard(p: ProviderPreset, xc: HsuColors, onSite: () -> Unit, onA
             Text("官网注册 ›", fontSize = 12.sp, fontFamily = Mono, color = xc.sub,
                 modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onSite() })
             Spacer(Modifier.weight(1f))
-            Box(Modifier.clip(RoundedCornerShape(16.dp)).background(xc.green.copy(alpha = 0.15f))
+            Box(Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(8.dp)).background(xc.green.copy(alpha = 0.15f))
                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onAdd() }
-                .padding(horizontal = 16.dp, vertical = 7.dp)) {
+                .padding(horizontal = 16.dp, vertical = 7.dp), contentAlignment = Alignment.Center) {
                 Text("添加", fontSize = 12.sp, fontFamily = Mono, color = xc.green)
             }
         }

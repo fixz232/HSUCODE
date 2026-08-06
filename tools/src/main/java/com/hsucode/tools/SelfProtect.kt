@@ -43,7 +43,7 @@ object SelfProtect {
      */
     @Volatile
     var appDataDir: String = ""
-        set(value) { field = value.trimEnd('/') }
+        set(value) { field = value.replace('\\', '/').trimEnd('/') }
 
     /**
      * 锁死的子目录。只挑「坏了 App 就起不来」的那几个:
@@ -70,6 +70,19 @@ object SelfProtect {
     }
 
     private fun normalizedPath(path: String): String {
+        if (java.io.File.separatorChar != '/') {
+            val normalized = path.replace('\\', '/')
+            val absolute = normalized.startsWith('/') || Regex("^[A-Za-z]:/").containsMatchIn(normalized)
+            val parts = ArrayDeque<String>()
+            normalized.split('/').forEach { part ->
+                when (part) {
+                    "", "." -> Unit
+                    ".." -> if (parts.isNotEmpty()) parts.removeLast()
+                    else -> parts.addLast(part)
+                }
+            }
+            return (if (absolute && normalized.startsWith('/')) "/" else "") + parts.joinToString("/")
+        }
         val file = java.io.File(path)
         val normalized = try {
             file.canonicalPath

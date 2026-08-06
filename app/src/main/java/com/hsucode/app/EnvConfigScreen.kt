@@ -8,7 +8,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,33 +38,45 @@ private val Mono = FontFamily(Font(R.font.jetbrains_mono, FontWeight.Normal))
 private enum class InstallState { IDLE, INSTALLING, OK, FAIL }
 
 /**
- * 「环境配置」页:仿参考设计,分类列出可安装的开发环境/工具,支持全选/单选/已安装检测/
- * 收起展开/开始配置(经 root shell 自适应包管理器并行? 顺序安装)。
+ * 「Linux 与工作区」页：所有用户都能部署 PRoot Ubuntu；Root 设备可额外保留 chroot 环境。
  */
 @Composable
 fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
     val xc = LocalHsuColors.current
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
     val categories = remember { EnvCatalog.categories }
     // toolId -> 已安装 / 选中 / 安装状态;category.title -> 展开
     val installed = remember { mutableStateMapOf<String, Boolean>() }
-    val selected = remember { mutableStateMapOf<String, Boolean>().apply { EnvCatalog.allTools.forEach { put(it.id, true) } } }
+    val selected = remember {
+        mutableStateMapOf<String, Boolean>().apply {
+            EnvCatalog.allTools.forEach { put(it.id, it.id in EnvCatalog.defaultToolIds) }
+        }
+    }
     val installState = remember { mutableStateMapOf<String, InstallState>() }
     val expanded = remember { mutableStateMapOf<String, Boolean>().apply { categories.forEach { put(it.title, true) } } }
     var running by remember { mutableStateOf(false) }
+    var completedCount by remember { mutableIntStateOf(0) }
+    var totalCount by remember { mutableIntStateOf(0) }
+    var progressMessage by remember { mutableStateOf("") }
+    var failureDetail by remember { mutableStateOf("") }
     // L1 修复:初始 false —— 未部署/未就绪时不显示"检测中…"(仅真正开始检测时才置 true)。
     var detecting by remember { mutableStateOf(false) }
+    val prootState = ProotLinuxEnvironment.state
+    val rootState = LinuxEnvironment.state
+    val backend = WorkspaceRuntime.backend()
+    val linuxReady = backend != WorkspaceRuntime.Backend.ANDROID_SHELL
 
     // 环境就绪后(或进入时已就绪)检测已安装状态。
-    LaunchedEffect(LinuxEnvironment.state) {
-        if (LinuxEnvironment.isReady()) {
+    LaunchedEffect(backend, prootState, rootState) {
+        if (linuxReady) {
             detecting = true
-            withContext(Dispatchers.IO) {
-                EnvCatalog.allTools.forEach { t -> installed[t.id] = EnvSetupManager.isInstalled(t) }
-            }
+            val probe = withContext(Dispatchers.IO) { EnvSetupManager.inspectInstalled(EnvCatalog.allTools) }
+            installed.clear()
+            installed.putAll(probe)
             detecting = false
+        } else {
+            installed.clear()
         }
     }
 
@@ -67,33 +86,95 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
         cat.tools.forEach { selected[it.id] = newVal }
     }
 
-    fun deployEnv() {
-        // M2:部署中或安装中都不再重复部署(bootstrap 内部也有原子互斥兜底)。
-        if (running || LinuxEnvironment.state == LinuxEnvironment.State.SETTING_UP) return
-        // 已就绪时点的是「重新部署」→ 强制重装;否则首次部署(已存在则自动跳过下载)。
-        val force = LinuxEnvironment.state == LinuxEnvironment.State.READY
-        // 部署跑在应用级作用域,不随当前 Compose 页面销毁。
-        // 否则一点「查看终端」/页面重组就把 scope 取消,解包中断 → "The coroutine scope left the composition" 判失败。
+    fun deployProot() {
+        if (running || ProotLinuxEnvironment.state == ProotLinuxEnvironment.State.SETTING_UP) return
+        progressMessage = "正在部署 Ubuntu，完成后会自动检查环境。"
+        failureDetail = ""
         val appCtx = context.applicationContext
         (appCtx as HsucodeApplication).applicationScope.launch(Dispatchers.IO) {
-            LinuxEnvironment.bootstrap(appCtx, force = force)
+            ProotLinuxEnvironment.bootstrap(force = ProotLinuxEnvironment.isReady())
+        }
+    }
+
+    fun deployRootEnv() {
+        if (running || LinuxEnvironment.state == LinuxEnvironment.State.SETTING_UP) return
+        val appCtx = context.applicationContext
+        (appCtx as HsucodeApplication).applicationScope.launch(Dispatchers.IO) {
+            LinuxEnvironment.bootstrap(appCtx, force = LinuxEnvironment.isReady())
+        }
+    }
+
+    // 免 Root 工作区是默认路径：首次打开环境页时自动开始部署，用户无需先理解后端切换。
+    // 下载/解压过程仍在应用级协程运行，离开页面不会中断；已有环境不会重复下载。
+    LaunchedEffect(Unit) {
+        if (ProotLinuxEnvironment.state == ProotLinuxEnvironment.State.NOT_SETUP &&
+            ProotLinuxEnvironment.isSupported()
+        ) {
+            deployProot()
         }
     }
 
     fun startInstall() {
-        if (running || !LinuxEnvironment.isReady()) return
+        if (running) return
+        if (!linuxReady) {
+            progressMessage = "Ubuntu 尚未验证成功，正在启动部署。"
+            failureDetail = ""
+            deployProot()
+            return
+        }
+        if (EnvSetupManager.isInstalling()) {
+            progressMessage = "另一个环境配置任务仍在运行，请稍后再试。"
+            return
+        }
+        val todo = EnvCatalog.allTools.filter { selected[it.id] == true && installed[it.id] != true }
+        if (todo.isEmpty()) {
+            progressMessage = "所选工具已经安装完成。"
+            failureDetail = ""
+            return
+        }
+        if (!EnvSetupManager.beginInstall()) {
+            progressMessage = "环境配置任务未能启动，请稍后重试。"
+            return
+        }
         running = true
-        scope.launch {
-            val todo = EnvCatalog.allTools.filter { selected[it.id] == true && installed[it.id] != true }
-            for (t in todo) {
-                installState[t.id] = InstallState.INSTALLING
-                val (ok, _) = withContext(Dispatchers.IO) { EnvSetupManager.install(t) }
-                // 安装后复检真实状态。
-                val nowInstalled = withContext(Dispatchers.IO) { EnvSetupManager.isInstalled(t) }
-                installed[t.id] = nowInstalled
-                installState[t.id] = if (ok || nowInstalled) InstallState.OK else InstallState.FAIL
+        completedCount = 0
+        totalCount = todo.size
+        progressMessage = "正在更新 Ubuntu 软件源…"
+        failureDetail = ""
+        val appScope = (context.applicationContext as HsucodeApplication).applicationScope
+        appScope.launch(Dispatchers.IO) {
+            try {
+                val prepared = EnvSetupManager.preparePackageManager()
+                if (!prepared.ok) {
+                    withContext(Dispatchers.Main) {
+                        failureDetail = prepared.detail
+                        progressMessage = "软件源更新失败，未开始安装。请检查网络后重试。"
+                    }
+                    return@launch
+                }
+                for (t in todo) {
+                    withContext(Dispatchers.Main) {
+                        installState[t.id] = InstallState.INSTALLING
+                        progressMessage = "正在安装 ${t.name}（${completedCount + 1}/$totalCount）…"
+                    }
+                    val (ok, detail) = EnvSetupManager.install(t)
+                    // 安装后复检真实状态。
+                    val nowInstalled = EnvSetupManager.isInstalled(t)
+                    withContext(Dispatchers.Main) {
+                        installed[t.id] = nowInstalled
+                        installState[t.id] = if (ok || nowInstalled) InstallState.OK else InstallState.FAIL
+                        completedCount++
+                        if (!ok && !nowInstalled) failureDetail = detail
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    val failed = todo.count { installState[it.id] == InstallState.FAIL }
+                    progressMessage = if (failed == 0) "所选工具已安装完成。" else "$failed 个工具未安装成功，可展开查看状态后重试。"
+                }
+            } finally {
+                EnvSetupManager.endInstall()
+                withContext(Dispatchers.Main) { running = false }
             }
-            running = false
         }
     }
 
@@ -103,15 +184,16 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("‹ 返回", fontSize = 13.sp, fontFamily = Mono, color = xc.sub,
-                modifier = Modifier.clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onBack() })
+            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回", tint = xc.ink)
+            }
             Spacer(Modifier.weight(1f))
             if (detecting) Text("检测中…", fontSize = 11.sp, fontFamily = Mono, color = xc.faint)
         }
-        Text("环境配置", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = xc.ink,
-            fontFamily = Mono, modifier = Modifier.padding(start = 16.dp, top = 4.dp))
-        Text("内置一套真正的 Ubuntu(apt)环境跑在本机(root+chroot),工具都装在里面;首次部署自动下载一次基础系统(~35MB),之后离线可用。",
-            fontSize = 11.sp, fontFamily = Mono, color = xc.sub,
+        Text("Linux 与工作区", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = xc.ink,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp))
+        Text("默认使用 PRoot Ubuntu，在应用私有目录内运行 apt、Python、Node 与 Git，不需要 Root。",
+            fontSize = 13.sp, color = xc.sub,
             modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 8.dp))
 
         LazyColumn(
@@ -119,7 +201,27 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            item(key = "__env_status__") { EnvStatusCard(xc, onDeploy = { deployEnv() }, onOpenTerminal = onOpenTerminal) }
+            item(key = "__workspace_status__") {
+                ProotStatusCard(xc, onDeploy = { deployProot() }, onOpenTerminal = onOpenTerminal)
+            }
+            if (running || progressMessage.isNotBlank() || failureDetail.isNotBlank()) {
+                item(key = "__install_progress__") {
+                    InstallProgressCard(
+                        xc = xc,
+                        running = running,
+                        completedCount = completedCount,
+                        totalCount = totalCount,
+                        message = progressMessage,
+                        detail = failureDetail,
+                        onOpenTerminal = onOpenTerminal
+                    )
+                }
+            }
+            if (WorkspaceRuntime.isRootModeEnabled()) {
+                item(key = "__root_env_status__") {
+                    RootEnvStatusCard(xc, onDeploy = { deployRootEnv() }, onOpenTerminal = onOpenTerminal)
+                }
+            }
             items(categories, key = { it.title }) { cat ->
                 CategoryCard(
                     cat = cat, xc = xc,
@@ -139,14 +241,14 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Box(
-                Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp))
+                Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(8.dp))
                     .background(xc.sub.copy(alpha = 0.25f))
                     .clickable(enabled = !running, indication = null, interactionSource = remember { MutableInteractionSource() }) { onBack() },
                 contentAlignment = Alignment.Center
             ) { Text("跳过", fontSize = 15.sp, fontFamily = Mono, color = xc.ink) }
-            val canStart = !running && LinuxEnvironment.isReady()
+            val canStart = !running && ProotLinuxEnvironment.state != ProotLinuxEnvironment.State.SETTING_UP
             Box(
-                Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp))
+                Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(8.dp))
                     .background(if (canStart) xc.green else xc.green.copy(alpha = 0.5f))
                     .clickable(enabled = canStart, indication = null, interactionSource = remember { MutableInteractionSource() }) { startInstall() },
                 contentAlignment = Alignment.Center
@@ -154,7 +256,7 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
                 Text(
                     when {
                         running -> "配置中…"
-                        !LinuxEnvironment.isReady() -> "先部署环境"
+                        !linuxReady -> "部署 Ubuntu"
                         else -> "开始配置"
                     },
                     fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = Mono, color = Color.White
@@ -178,7 +280,7 @@ private fun CategoryCard(
     onToggleTool: (String) -> Unit
 ) {
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
             .background(xc.bgElevated).padding(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -187,6 +289,9 @@ private fun CategoryCard(
                     Text(cat.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = xc.ink, fontFamily = Mono)
                 }
                 if (cat.required) Text("(必须)", fontSize = 11.sp, fontFamily = Mono, color = Color(0xFFF2C14E),
+                    modifier = Modifier.padding(top = 2.dp))
+                val selectedCount = cat.tools.count { selected[it.id] == true }
+                Text("$selectedCount/${cat.tools.size} 已选择", fontSize = 11.sp, color = xc.green,
                     modifier = Modifier.padding(top = 2.dp))
                 Text(cat.subtitle, fontSize = 12.sp, fontFamily = Mono, color = xc.sub, modifier = Modifier.padding(top = 4.dp))
             }
@@ -222,6 +327,44 @@ private fun CategoryCard(
 }
 
 @Composable
+private fun InstallProgressCard(
+    xc: HsuColors,
+    running: Boolean,
+    completedCount: Int,
+    totalCount: Int,
+    message: String,
+    detail: String,
+    onOpenTerminal: () -> Unit
+) {
+    val progress = if (totalCount > 0) (completedCount.toFloat() / totalCount).coerceIn(0f, 1f) else 0f
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(xc.activeBg)
+            .border(1.dp, xc.green.copy(alpha = .25f), RoundedCornerShape(8.dp)).padding(14.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (running) "环境配置进行中" else "环境配置结果", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = xc.ink)
+                Text(message.ifBlank { "正在准备…" }, fontSize = 12.sp, color = xc.sub, modifier = Modifier.padding(top = 4.dp))
+            }
+            TextButton(onClick = onOpenTerminal) { Text("查看日志") }
+        }
+        if (totalCount > 0) {
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.material3.LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                color = xc.green,
+                trackColor = xc.border
+            )
+            Text("已处理 $completedCount/$totalCount", fontSize = 11.sp, color = xc.sub, modifier = Modifier.padding(top = 5.dp))
+        }
+        if (detail.isNotBlank()) {
+            Text(detail.takeLast(500), fontSize = 10.sp, fontFamily = Mono, color = xc.red, lineHeight = 14.sp, modifier = Modifier.padding(top = 8.dp))
+        }
+    }
+}
+
+@Composable
 private fun StatusTag(id: String, installed: Map<String, Boolean>, installState: Map<String, InstallState>, xc: HsuColors) {
     val st = installState[id] ?: InstallState.IDLE
     when (st) {
@@ -235,24 +378,80 @@ private fun StatusTag(id: String, installed: Map<String, Boolean>, installState:
     }
 }
 
-/** 顶部:内置 Linux 环境状态 + 一键部署。 */
+/** 所有设备均可用的 PRoot Ubuntu 工作区。 */
 @Composable
-private fun EnvStatusCard(xc: HsuColors, onDeploy: () -> Unit, onOpenTerminal: () -> Unit) {
-    val st = LinuxEnvironment.state
-    val (label, color) = when (st) {
-        LinuxEnvironment.State.READY -> "Linux 环境已就绪" to xc.green
-        LinuxEnvironment.State.SETTING_UP -> "正在部署环境…" to Color(0xFFF2C14E)
-        LinuxEnvironment.State.ERROR -> "环境部署失败" to xc.red
-        LinuxEnvironment.State.NOT_SETUP -> "未部署 Linux 环境" to xc.faint
+private fun ProotStatusCard(xc: HsuColors, onDeploy: () -> Unit, onOpenTerminal: () -> Unit) {
+    val st = ProotLinuxEnvironment.state
+    val label = when (st) {
+        ProotLinuxEnvironment.State.READY -> "Ubuntu 已就绪"
+        ProotLinuxEnvironment.State.SETTING_UP -> "正在下载并安装 Ubuntu…"
+        ProotLinuxEnvironment.State.ERROR -> "Ubuntu 安装失败"
+        ProotLinuxEnvironment.State.UNSUPPORTED -> "当前设备不支持 PRoot"
+        ProotLinuxEnvironment.State.NOT_SETUP -> "尚未安装 Ubuntu"
     }
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(xc.bgElevated).padding(horizontal = 16.dp, vertical = 12.dp)
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(xc.bgElevated)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(xc.activeBg),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Outlined.FolderOpen, contentDescription = null, tint = xc.green, modifier = Modifier.size(20.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("免 Root Ubuntu", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = xc.ink)
+                Text("$label · PRoot 隔离用户空间", fontSize = 12.sp, color = xc.sub)
+            }
+            IconButton(onClick = onOpenTerminal, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Outlined.Terminal, contentDescription = "打开工作区终端", tint = xc.green)
+            }
+        }
+        Text(
+            if (st == ProotLinuxEnvironment.State.UNSUPPORTED) ProotLinuxEnvironment.supportDetail()
+            else ProotLinuxEnvironment.displayPath(), fontSize = 10.sp, fontFamily = Mono, color = xc.faint,
+            maxLines = 1, modifier = Modifier.padding(top = 8.dp)
+        )
+        if (st == ProotLinuxEnvironment.State.SETTING_UP || (st == ProotLinuxEnvironment.State.ERROR && ProotLinuxEnvironment.setupLog.isNotBlank())) {
+            Text(ProotLinuxEnvironment.setupLog.trim().takeLast(360), fontSize = 10.sp, fontFamily = Mono,
+                color = xc.faint, lineHeight = 14.sp, modifier = Modifier.padding(top = 8.dp))
+        }
+        if (st != ProotLinuxEnvironment.State.UNSUPPORTED) {
+            Text(
+                if (st == ProotLinuxEnvironment.State.SETTING_UP) "取消安装" else if (st == ProotLinuxEnvironment.State.READY) "重新安装" else "安装 Ubuntu",
+                fontSize = 12.sp, fontFamily = Mono, color = if (st == ProotLinuxEnvironment.State.SETTING_UP) xc.red else xc.green,
+                modifier = Modifier.padding(top = 10.dp).clickable(
+                    indication = null, interactionSource = remember { MutableInteractionSource() }
+                ) {
+                    if (st == ProotLinuxEnvironment.State.SETTING_UP) ProotLinuxEnvironment.cancelBootstrap() else onDeploy()
+                }
+            )
+        }
+    }
+}
+
+/** Root 设备可选的完整 Ubuntu 环境。 */
+@Composable
+private fun RootEnvStatusCard(xc: HsuColors, onDeploy: () -> Unit, onOpenTerminal: () -> Unit) {
+    val st = LinuxEnvironment.state
+    val (label, color) = when (st) {
+        LinuxEnvironment.State.READY -> "Ubuntu 已就绪" to xc.green
+        LinuxEnvironment.State.SETTING_UP -> "正在部署 Ubuntu…" to Color(0xFFF2C14E)
+        LinuxEnvironment.State.ERROR -> "Ubuntu 部署失败" to xc.red
+        LinuxEnvironment.State.NOT_SETUP -> "尚未部署 Ubuntu" to xc.faint
+    }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(xc.bgElevated).padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(color))
             Spacer(Modifier.width(8.dp))
-            Text(label, fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = Mono, color = xc.ink)
-            Spacer(Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text("Root chroot 增强环境", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = xc.ink)
+                Text("$label · 需要 Root", fontSize = 12.sp, color = xc.sub)
+            }
             // 查看终端(可视化部署/安装/AI 操作)
             Text("查看终端 ›", fontSize = 12.sp, fontFamily = Mono, color = xc.sub,
                 modifier = Modifier
@@ -265,7 +464,7 @@ private fun EnvStatusCard(xc: HsuColors, onDeploy: () -> Unit, onOpenTerminal: (
                         .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onDeploy() }
                         .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {
-                    Text((if (st == LinuxEnvironment.State.READY) "重新部署" else "部署环境") + " ›",
+                    Text(if (st == LinuxEnvironment.State.READY) "重新部署" else "部署",
                         fontSize = 12.sp, fontFamily = Mono, color = xc.green)
                 }
             } else {

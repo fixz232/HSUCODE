@@ -41,6 +41,12 @@ class SecurityGateTest {
         assertTrue(decide(g, "shell_exec", shell("git status"), PermissionMode.ASK) is Decision.Allow)
     }
 
+    @Test fun envExec_usesShellRiskPolicy() {
+        val g = gate()
+        assertTrue(decide(g, "env_exec", shell("pwd"), PermissionMode.ASK) is Decision.Allow)
+        assertTrue(decide(g, "env_exec", shell("rm -rf /"), PermissionMode.ALLOW_ALL) is Decision.Denied)
+    }
+
     @Test fun ask_chainWithUnsafe_needsConfirm() {
         val g = gate()
         assertTrue(decide(g, "shell_exec", shell("ls && rm foo"), PermissionMode.ASK) is Decision.NeedConfirm)

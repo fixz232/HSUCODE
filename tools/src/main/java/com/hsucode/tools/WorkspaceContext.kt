@@ -11,11 +11,17 @@ package com.hsucode.tools
  * 这样每个会话核在自己的作用域里执行工具时,始终解析到【它自己】的工作区/项目,与前台切换无关。
  */
 object WorkspaceContext {
-    const val DEFAULT_ROOT = "/storage/emulated/0/HSUCODE"
+    /** 旧版共享存储根，仅用于识别旧配置；新安装默认使用应用可写目录。 */
+    const val LEGACY_SHARED_ROOT = "/storage/emulated/0/HSUCODE"
+    const val DEFAULT_ROOT = LEGACY_SHARED_ROOT
+
+    @Volatile
+    var defaultRoot: String = LEGACY_SHARED_ROOT
+        private set
 
     // 全局兜底(可被设置/项目覆盖)。
     @Volatile
-    private var globalRoot: String = DEFAULT_ROOT
+    private var globalRoot: String = defaultRoot
     @Volatile
     private var globalProjectId: Long = 0L
 
@@ -26,7 +32,15 @@ object WorkspaceContext {
     /** 当前生效的工作区根:优先线程覆盖,否则全局兜底。setter 写全局兜底(保持旧行为)。 */
     var workspaceRoot: String
         get() = tlRoot.get() ?: globalRoot
-        set(value) { globalRoot = if (value.isBlank()) DEFAULT_ROOT else value.trimEnd('/') }
+        set(value) { globalRoot = if (value.isBlank()) defaultRoot else value.trimEnd('/') }
+
+    /** 在创建会话和工具之前配置一个确定可写的应用私有默认根。 */
+    fun configureDefaultRoot(path: String) {
+        val normalized = path.trim().trimEnd('/').ifBlank { LEGACY_SHARED_ROOT }
+        val previous = defaultRoot
+        defaultRoot = normalized
+        if (globalRoot == previous || globalRoot == LEGACY_SHARED_ROOT) globalRoot = normalized
+    }
 
     /** 当前生效的项目 id(记忆按项目隔离):优先线程覆盖,否则全局兜底。 */
     var projectId: Long

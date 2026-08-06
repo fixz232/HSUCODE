@@ -6,6 +6,8 @@ import com.hsucode.data.AppDatabase
 import com.hsucode.data.McpServerEntity
 import com.hsucode.provider.McpClient
 import com.hsucode.provider.McpServerInfo
+import com.hsucode.provider.McpSessionRegistry
+import com.hsucode.provider.McpOAuthClient
 import com.hsucode.security.KeystoreProvider
 import com.hsucode.tools.McpToolAdapter
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +34,13 @@ class McpManager(
 
     /** Active connections: key(url 或 stdio:name)→ 传输(HTTP/stdio) */
     private val clients = mutableMapOf<String, com.hsucode.provider.McpTransport>()
+    val sessionRegistry = McpSessionRegistry()
+
+    suspend fun requestOAuthDeviceCode(endpoint: String, clientId: String, scope: String = "") =
+        McpOAuthClient.requestDeviceCode(okHttpClient, endpoint, clientId, scope)
+
+    suspend fun pollOAuthToken(endpoint: String, clientId: String, code: McpOAuthClient.DeviceCode) =
+        McpOAuthClient.pollToken(okHttpClient, endpoint, clientId, code)
 
     /** Active tool adapters registered in ToolRegistry: server URL → tool adapter names */
     private val registeredTools = mutableMapOf<String, List<String>>()
@@ -45,8 +54,9 @@ class McpManager(
         try {
             Log.i(TAG, "Connecting to MCP server: $name ($url)")
 
-            // Create and initialize client
-            val client = McpClient(okHttpClient, url, authHeader)
+            val key = "http:$url"
+            // The registry wraps the transport so a dropped HTTP/SSE session is rebuilt once.
+            val client = sessionRegistry.acquire(key) { McpClient(okHttpClient, url, authHeader) }
             val serverInfo = client.initialize()
 
             // Discover tools
@@ -62,7 +72,6 @@ class McpManager(
             }
 
             // Store connection
-            val key = "http:$url"
             clients[key] = client
             registeredTools[key] = adapterNames
 
@@ -109,7 +118,15 @@ class McpManager(
         val key = "stdio:$name"
         try {
             Log.i(TAG, "Connecting to stdio MCP server: $name ($command)")
-            val client = com.hsucode.provider.McpStdioClient(command, args, env, runAsRoot)
+            // Android 本身没有 Node/Python 运行时；当用户部署了免 Root Ubuntu 后，
+            // 将 npx/uvx MCP 持久进程放进 PRoot，并保留真正的 stdin/stdout 管道。
+            // Root 配置仍走原本显式的 su 路径，不会被静默替换。
+            val prootLauncher = if (!runAsRoot && WorkspaceRuntime.backend() == WorkspaceRuntime.Backend.PROOT_UBUNTU) {
+                { ProotLinuxEnvironment.startMcpProcess(command, args, env) }
+            } else null
+            val client = sessionRegistry.acquire(key) {
+                com.hsucode.provider.McpStdioClient(command, args, env, runAsRoot, prootLauncher)
+            }
             val serverInfo = client.initialize()
             val tools = client.listTools()
             val adapterNames = mutableListOf<String>()
@@ -150,7 +167,7 @@ class McpManager(
                     envJson = org.json.JSONObject(env).toString(), runAsRoot = runAsRoot
                 ))
             }
-            McpConnectResult.Error(e.message ?: "本地 MCP 连接失败(检查 command 是否可执行,如 Termux 的 node/npx)")
+            McpConnectResult.Error(e.message ?: "本地 MCP 连接失败(请检查 Ubuntu 中的 node/npx 或 uvx 是否已安装)")
         }
     }
 
@@ -189,6 +206,7 @@ class McpManager(
         registeredTools.remove(key)
 
         // Disconnect client
+        sessionRegistry.close(key)
         clients[key]?.close()
         clients.remove(key)
 

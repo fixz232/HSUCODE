@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity() {
             var currentPage by remember { mutableStateOf("chat") }
             // 终端页可从「对话页顶栏」或「环境配置页」进入;记录来源,退出时精确回到来处(修返回逻辑 bug)。
             var terminalOrigin by remember { mutableStateOf("chat") }
+            var workspaceOrigin by remember { mutableStateOf("settings") }
             var rootDiagResult by remember { mutableStateOf<RootDiagnosticResult?>(null) }
             var editingIdentityId by remember { mutableStateOf<Long?>(null) }
             val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -165,7 +166,11 @@ class MainActivity : ComponentActivity() {
             var lastBackMs by remember { mutableStateOf(0L) }
             BackHandler(enabled = drawerState.isOpen) { drawerScope.launch { drawerState.close() } }
             BackHandler(enabled = !drawerState.isOpen && currentPage != "chat") {
-                currentPage = if (currentPage == "terminal") terminalOrigin else parentPageOf(currentPage)
+                currentPage = when (currentPage) {
+                    "terminal" -> terminalOrigin
+                    "env_config" -> workspaceOrigin
+                    else -> parentPageOf(currentPage)
+                }
             }
             BackHandler(enabled = !drawerState.isOpen && currentPage == "chat") {
                 val now = System.currentTimeMillis()
@@ -263,6 +268,8 @@ class MainActivity : ComponentActivity() {
                             value = withContext(Dispatchers.IO) { app.database.providerConfigDao().getActive() }
                         }
                         val names = active?.enabledModelIds ?: emptyList()
+                        val currentSession = sessions.firstOrNull { it.id == currentSessionId }
+                        val currentIdentity = allIdentities.firstOrNull { it.id == app.activeIdentityId }
                         val skillNames = remember { mutableStateOf<List<String>>(emptyList()) }
                         val mcpNames = remember { mutableStateOf<List<String>>(emptyList()) }
                         LaunchedEffect(Unit) {
@@ -277,7 +284,11 @@ class MainActivity : ComponentActivity() {
                         val curGoal = goalSessions.firstOrNull { it.id == app.currentSessionId }
                         ChatScreen(
                             chatState = app.agentChatState,
+                            conversationTitle = currentSession?.title.orEmpty().ifBlank { "新聊天" },
+                            assistantName = currentIdentity?.name.orEmpty().ifBlank { "默认助手" },
                             currentModel = app.currentModelLabel,
+                            supplierId = active?.supplierId.orEmpty(),
+                            providerName = active?.name.orEmpty(),
                             availableModels = names,
                             isGoalSession = curIsGoal,
                             goalStatusCode = curGoal?.goalStatus ?: "",
@@ -297,9 +308,16 @@ class MainActivity : ComponentActivity() {
                             onNavigateToAgentScene = { currentPage = "agent_scene" },
                             onNavigateToStats = { currentPage = "stats" },
                             onNavigateToTerminal = { terminalOrigin = "chat"; currentPage = "terminal" },
+                            onNavigateToWorkspace = { workspaceOrigin = "chat"; currentPage = "env_config" },
                             subAgentActive = subAgentSceneSnapshot.brainBusy,
                             ttsHelper = ttsHelper,
+                            voiceInputHelper = voiceInputHelper,
                             onOpenDrawer = { drawerScope.launch { drawerState.open() } },
+                            onNewChat = {
+                                val newId = app.createNewSession()
+                                app.switchToSession(newId)
+                                currentPage = "chat"
+                            },
                             planState = app.planState,
                             skillNames = skillNames.value,
                             onRegenerate = { msgId -> app.regenerateFromMessage(msgId) },
@@ -319,6 +337,7 @@ class MainActivity : ComponentActivity() {
                     }
                     "settings" -> SettingsScreen(
                         onBack = { currentPage = "chat" },
+                        onNavigateToModelCenter = { currentPage = "model_center" },
                         onNavigateToSupplierConfig = { currentPage = "supplier" },
                         onNavigateToModelMarket = { currentPage = "model_market" },
                         onNavigateToGit = { currentPage = "git_config" },
@@ -341,7 +360,8 @@ class MainActivity : ComponentActivity() {
                         onNavigateToGroupRooms = { currentPage = "group_rooms" },
                         onNavigateToProfiles = { currentPage = "profiles" },
                         onNavigateToSubAgents = { currentPage = "sub_agents" },
-                        onNavigateToEnvConfig = { currentPage = "env_config" },
+                        onNavigateToEnvConfig = { workspaceOrigin = "settings"; currentPage = "env_config" },
+                        onNavigateToDeveloperWorkbench = { currentPage = "developer_workbench" },
                         onNavigateToBackup = { currentPage = "backup_restore" },
                         onNavigateToTaskRecovery = { currentPage = "task_recovery" },
                         onNavigateToHealth = { currentPage = "configuration_health" },
@@ -349,6 +369,8 @@ class MainActivity : ComponentActivity() {
                         darkMode = app.darkMode,
                         onUpdateDarkMode = { app.updateDarkMode(it) },
                         rootDetector = app.rootDetector,
+                        rootModeEnabled = app.rootModeEnabled,
+                        onUpdateRootMode = { app.updateRootModeEnabled(it) },
                         permissionMode = app.permissionModeState,
                         onUpdatePermissionMode = { mode -> app.updatePermissionMode(mode) },
                         onRootDiagnostic = {
@@ -454,7 +476,6 @@ class MainActivity : ComponentActivity() {
                     )
                     "aux_models" -> AuxModelsScreen(
                         database = app.database,
-                        keystore = app.keystore,
                         onBack = { currentPage = "settings" }
                     )
                     "lan_devices" -> LanDiscoveryScreen(onBack = { currentPage = "settings" })
@@ -475,7 +496,11 @@ class MainActivity : ComponentActivity() {
                     )
                     "sub_agents" -> SubAgentsScreen(
                         database = app.database,
-                        onBack = { currentPage = "settings" }
+                        onBack = { currentPage = "settings" },
+                        onRunAgent = { agent, task ->
+                            app.runSubAgent(agent, task)
+                            currentPage = "agent_scene"
+                        }
                     )
                     "context_compress" -> ContextCompressionScreen(
                         database = app.database,
@@ -489,13 +514,57 @@ class MainActivity : ComponentActivity() {
                         onBack = { currentPage = "settings" },
                         onProvider = { currentPage = "supplier" },
                         onWorkspace = { currentPage = "settings" },
-                        onEnvironment = { currentPage = "env_config" },
+                        onEnvironment = { workspaceOrigin = "settings"; currentPage = "env_config" },
                         onMcp = { currentPage = "mcp" },
                         onUpdate = { currentPage = "about" },
                         onRecovery = { currentPage = "task_recovery" }
                     )
-                    "env_config" -> EnvConfigScreen(
+                    "model_center" -> ModelCenterScreen(
+                        database = app.database,
+                        keystore = app.keystore,
+                        openAiClient = app.openAiClient,
+                        onBack = { currentPage = "settings" }
+                    )
+                    "developer_workbench" -> DeveloperWorkbenchScreen(
+                        workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
                         onBack = { currentPage = "settings" },
+                        onFiles = { currentPage = "workspace_files" },
+                        onDocuments = { currentPage = "document_workbench" },
+                        onNetwork = { currentPage = "network_tools" },
+                        onExtensions = { currentPage = "extension_market" },
+                        onPrompts = { currentPage = "prompt_library" },
+                        onTerminal = { terminalOrigin = "developer_workbench"; currentPage = "terminal" },
+                        onEnvironment = { workspaceOrigin = "developer_workbench"; currentPage = "env_config" },
+                        onGit = { currentPage = "git_config" }
+                    )
+                    "workspace_files" -> WorkspaceFilesScreen(
+                        workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
+                        onBack = { currentPage = "developer_workbench" }
+                    )
+                    "document_workbench" -> DocumentWorkbenchScreen(
+                        workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
+                        onBack = { currentPage = "developer_workbench" },
+                        onOpenFiles = { currentPage = "workspace_files" },
+                    )
+                    "network_tools" -> NetworkToolsScreen(
+                        workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
+                        onBack = { currentPage = "developer_workbench" }
+                    )
+                    "extension_market" -> ExtensionMarketScreen(
+                        database = app.database,
+                        mcpManager = app.mcpManager,
+                        onBack = { currentPage = "developer_workbench" },
+                        onEnvironment = { workspaceOrigin = "extension_market"; currentPage = "env_config" },
+                        onManageMcp = { currentPage = "mcp" },
+                        onManageSkills = { currentPage = "skills" }
+                    )
+                    "prompt_library" -> PromptLibraryScreen(
+                        database = app.database,
+                        onBack = { currentPage = "developer_workbench" },
+                        onSaved = { app.invalidateAllSystemPrompts() }
+                    )
+                    "env_config" -> EnvConfigScreen(
+                        onBack = { currentPage = workspaceOrigin },
                         onOpenTerminal = { terminalOrigin = "env_config"; currentPage = "terminal" }
                     )
                     "agent_scene" -> AgentSceneScreen(
@@ -511,7 +580,12 @@ class MainActivity : ComponentActivity() {
                     )
                     "terminal" -> TerminalScreen(
                         terminal = app.terminalState,
-                        onBack = { currentPage = terminalOrigin }
+                        onBack = { currentPage = terminalOrigin },
+                        onDeployEnvironment = {
+                            app.applicationScope.launch(Dispatchers.IO) {
+                                ProotLinuxEnvironment.bootstrap(force = ProotLinuxEnvironment.isReady())
+                            }
+                        }
                     )
                     "identity_list" -> {
                         val sessionCounts = remember(sessions) {
@@ -561,6 +635,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        TermuxPtySessionManager.close()
         if (::ttsHelper.isInitialized) ttsHelper.shutdown()
         if (::voiceInputHelper.isInitialized) voiceInputHelper.reset()
     }
@@ -570,7 +645,8 @@ private fun parentPageOf(page: String): String = when (page) {
     "settings" -> "chat"
     "supplier", "model_market", "git_config", "audit", "memory_storage", "skills", "mcp", "curated_memory",
     "cron_jobs", "aux_models", "function_models", "sub_agents", "env_config", "context_compress", "about",
-    "lan_devices", "logs", "usage_stats", "kanban", "group_rooms", "profiles", "code_index" -> "settings"
+    "lan_devices", "logs", "usage_stats", "kanban", "group_rooms", "profiles", "code_index", "developer_workbench" -> "settings"
+    "workspace_files", "document_workbench", "network_tools", "extension_market", "prompt_library" -> "developer_workbench"
     "replay" -> "workflow"
     "identity_edit" -> "identity_list"
     "identity_list" -> "settings"

@@ -144,7 +144,7 @@ class KanbanRunner(
             val assigneePrompt = if (task.assignee.isNotBlank()) {
                 val sub = runCatching { database.subAgentDao().getAll() }.getOrNull()
                     ?.firstOrNull { it.name == task.assignee }
-                sub?.systemPrompt?.takeIf { it.isNotBlank() }
+                sub?.takeIf { it.enabled }?.systemPrompt?.takeIf { it.isNotBlank() }
                     ?.let { "\n\n你现在以「${task.assignee}」的身份执行这个任务:\n$it" }
                     ?: ""
             } else ""

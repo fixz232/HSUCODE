@@ -114,6 +114,12 @@ data class GroupMessageEntity(
     /** 空 = 用户;否则是成员的 displayName。 */
     val sender: String = "",
     val content: String,
+    /** 回复引用的原消息 id;0 表示没有引用。快照字段保证原消息被压缩后仍可显示。 */
+    val replyToId: Long = 0,
+    /** 被引用消息的发送者;空表示用户。 */
+    val replyToSender: String = "",
+    /** 被引用消息的正文快照。 */
+    val replyToContent: String = "",
     /** 摘要消息(自动压缩产生的)标记,渲染时区别对待。 */
     val isDigest: Boolean = false,
     val ts: Long = System.currentTimeMillis()

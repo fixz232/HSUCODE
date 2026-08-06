@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
@@ -75,11 +76,17 @@ object GroupRoomEngine {
         .build()
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
+    /** 回复引用的快照,避免群聊压缩后丢失上下文。 */
+    data class GroupQuote(
+        val sourceMessageId: Long,
+        val sender: String,
+        val content: String
+    )
+
+    private data class GroupReply(val content: String, val messageId: Long)
+
     /**
-     * 处理一条新消息:解析 @,让被点到的成员依次回答。
-     *
-     * 关于「依次」而不是并行:群里成员应该能看到彼此刚说了什么(否则就成了各说各话的
-     * 平行宇宙)。代价是慢一些,但这才是群聊该有的样子。
+     * 处理一条新消息:解析 @,让同一批被点到的成员并行回答。
      *
      * @param onReply 每条回复落库后回调,供 UI 即时刷新。
      */
@@ -89,6 +96,7 @@ object GroupRoomEngine {
         roomId: Long,
         content: String,
         senderName: String,
+        seedMessageId: Long = 0,
         onReply: (suspend () -> Unit)? = null,
         /**
          * 完全访问模式下,让成员在自己的工作会话里跑一轮并返回汇报。
@@ -128,10 +136,11 @@ object GroupRoomEngine {
             seedContent = content,
             seedSender = senderName,
             allowChain = allowChain,
-            maxHops = maxHops
-        ) { name ->
+            maxHops = maxHops,
+            seedQuote = if (seedMessageId > 0) GroupQuote(seedMessageId, senderName, content) else null,
+            onBatchSpeaking = { names -> onSpeaking?.invoke(names.joinToString("、")) }
+        ) { name, replyTo ->
             val member = members.firstOrNull { it.displayName == name } ?: return@driveChain null
-            onSpeaking?.invoke(name)
 
             val reply = runCatching {
                 if (fullAccess) respondWithTools(database, roomId, member, members, room, runWorkTurn!!)
@@ -144,13 +153,18 @@ object GroupRoomEngine {
             if (reply.isBlank()) return@driveChain null
 
             // 落库要挡住取消:这句话已经花过钱了,不能因为用户此刻点停止就丢掉。
-            withContext(NonCancellable) {
+            val messageId = withContext(NonCancellable) {
                 dao.insertMessage(
-                    GroupMessageEntity(roomId = roomId, sender = name, content = reply)
+                    GroupMessageEntity(
+                        roomId = roomId, sender = name, content = reply,
+                        replyToId = replyTo?.sourceMessageId ?: 0L,
+                        replyToSender = replyTo?.sender.orEmpty(),
+                        replyToContent = replyTo?.content.orEmpty()
+                    )
                 )
             }
             onReply?.invoke()
-            reply
+            GroupReply(reply, messageId)
         }
 
         onSpeaking?.invoke("")
@@ -181,46 +195,84 @@ object GroupRoomEngine {
         /** 跳数上限;[GroupRoomEntity.UNLIMITED_HOPS] 表示无上限。 */
         maxHops: Int,
         speak: suspend (name: String) -> String?
+    ): Int = driveChain(
+        memberNames = memberNames,
+        seedContent = seedContent,
+        seedSender = seedSender,
+        allowChain = allowChain,
+        maxHops = maxHops,
+        speak = { name, _ -> speak(name)?.let { GroupReply(it, 0L) } }
+    )
+
+    /** 新调度器:一批被 @ 的成员并行回答,并携带引用上下文。 */
+    private suspend fun driveChain(
+        memberNames: List<String>,
+        seedContent: String,
+        seedSender: String,
+        allowChain: Boolean,
+        maxHops: Int,
+        onBatchSpeaking: ((List<String>) -> Unit)? = null,
+        seedQuote: GroupQuote? = null,
+        speak: suspend (name: String, replyTo: GroupQuote?) -> GroupReply?
     ): Int {
         val unlimited = maxHops == GroupRoomEntity.UNLIMITED_HOPS
 
-        // 队列元素:(这句话的内容, 谁说的, 这句话处在第几跳)
-        val queue = ArrayDeque<Triple<String, String, Int>>()
-        queue += Triple(seedContent, seedSender, 0)
+        // 队列元素:(这句话的内容, 谁说的, 第几跳, 这句话被回复时的引用来源)
+        data class ChainItem(val text: String, val from: String, val hop: Int, val quote: GroupQuote?)
+        val queue = ArrayDeque<ChainItem>()
+        queue += ChainItem(seedContent, seedSender, 0, seedQuote)
 
         var repliesMade = 0
         val turnsByMember = mutableMapOf<String, Int>()
 
         while (queue.isNotEmpty()) {
             currentCoroutineContext().ensureActive()
-            val (text, from, hop) = queue.removeFirst()
-            if (!unlimited && hop >= maxHops) continue
+            val item = queue.removeFirst()
+            if (!unlimited && item.hop >= maxHops) continue
+
+            // 预算只在消息批次之间检查,避免 @all 被预算从中间截断。
+            val budget = if (unlimited) RUNAWAY_CEILING else MAX_REPLIES_PER_CHAIN
+            if (repliesMade >= budget) {
+                Log.w(TAG, "chain stopped at $repliesMade replies (unlimited=$unlimited)")
+                queue.clear()
+                break
+            }
 
             val targets = MentionRouting
-                .resolveTargets(memberNames, text, from)
+                .resolveTargets(memberNames, item.text, item.from)
                 .take(MAX_TARGETS_PER_TURN)
             if (targets.isEmpty()) continue
 
-            for (name in targets) {
-                currentCoroutineContext().ensureActive()
-                // 无上限模式只受跑飞兜底约束;正常模式受总量闸约束
-                val budget = if (unlimited) RUNAWAY_CEILING else MAX_REPLIES_PER_CHAIN
-                if (repliesMade >= budget) {
-                    Log.w(TAG, "chain stopped at $repliesMade replies (unlimited=$unlimited)")
-                    queue.clear()
-                    break
-                }
+            val eligible = targets.filter { name ->
                 val used = turnsByMember.getOrDefault(name, 0)
-                if (!unlimited && used >= MAX_TURNS_PER_MEMBER) continue
+                if (!unlimited && used >= MAX_TURNS_PER_MEMBER) return@filter false
                 turnsByMember[name] = used + 1
+                true
+            }
+            if (eligible.isEmpty()) continue
+            onBatchSpeaking?.invoke(eligible)
 
-                val reply = speak(name) ?: continue
-                if (reply.isBlank()) continue
+            // Keep the safety budget exact and preserve cancellation between members.
+            // Running the batch concurrently allowed an @all fan-out to overshoot the
+            // ceiling and made a stop request race with several already-started calls.
+            val remaining = (budget - repliesMade).coerceAtLeast(0)
+            val results = eligible.take(remaining).map { name ->
+                currentCoroutineContext().ensureActive()
+                name to speak(name, item.quote)
+            }
+            for ((name, reply) in results) {
+                val result = reply ?: continue
+                if (result.content.isBlank()) continue
                 repliesMade++
 
                 // 成员回复里的 @ 是否续接下一跳,由房间开关决定。
                 // 关着时整个群聊只能靠用户一句一句推,谁都不接话 —— 那是缺陷,不是安全。
-                if (allowChain) queue += Triple(reply, name, hop + 1)
+                if (allowChain) {
+                    queue += ChainItem(
+                        result.content, name, item.hop + 1,
+                        GroupQuote(result.messageId, name, result.content)
+                    )
+                }
             }
         }
         return repliesMade
@@ -247,7 +299,7 @@ object GroupRoomEngine {
 
         val history = dao.getMessages(roomId).takeLast(30).joinToString("\n") { m ->
             val who = if (m.sender.isBlank()) "用户" else m.sender
-            "$who: ${m.content}"
+            "$who: ${displayText(m)}"
         }
         val roster = allMembers.joinToString("、") { "@${it.displayName}" }
         val workspace = workspaceOf(room)
@@ -421,7 +473,7 @@ object GroupRoomEngine {
 
         val transcript = old.joinToString("\n") { m ->
             val who = if (m.sender.isBlank()) "用户" else m.sender
-            "$who: ${m.content}"
+            "$who: ${displayText(m)}"
         }
         val body = JSONObject().apply {
             put("model", cfg.model)
@@ -489,7 +541,12 @@ object GroupRoomEngine {
                 continue
             }
             val isOwn = m.sender.equals(ownName, ignoreCase = true)
-            val body = if (keepMentions) m.content else stripMentions(m.content)
+            var body = m.content
+            if (m.replyToContent.isNotBlank()) {
+                val quotedWho = m.replyToSender.ifBlank { "用户" }
+                body = "<quote sender=\"$quotedWho\">${m.replyToContent}</quote>\n$body"
+            }
+            if (!keepMentions) body = stripMentions(body)
             out += if (isOwn) {
                 JSONObject().put("role", "assistant").put("content", body)
             } else {
@@ -498,6 +555,14 @@ object GroupRoomEngine {
             }
         }
         return out
+    }
+
+    /** 消息的展示文本:带引用时先给引用块,再给正文。 */
+    private fun displayText(m: GroupMessageEntity): String {
+        val quoted = if (m.replyToContent.isNotBlank()) {
+            "引用[${m.replyToSender.ifBlank { "用户" }}]: ${m.replyToContent}\n"
+        } else ""
+        return quoted + m.content
     }
 
     /** 去掉正文里的 @提及,并收拢因此产生的多余空格。 */

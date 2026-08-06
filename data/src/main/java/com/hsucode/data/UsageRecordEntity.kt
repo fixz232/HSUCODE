@@ -56,6 +56,11 @@ data class ModelUsage(
     val calls: Long
 )
 
+data class RecentModelUsage(
+    val model: String,
+    val lastUsed: Long
+)
+
 @Dao
 interface UsageRecordDao {
 
@@ -92,6 +97,14 @@ interface UsageRecordDao {
         ORDER BY (SUM(inputTokens) + SUM(outputTokens)) DESC
     """)
     suspend fun byModelSince(since: Long): List<ModelUsage>
+
+    @Query("""
+        SELECT model, MAX(ts) AS lastUsed
+        FROM usage_records
+        WHERE model != ''
+        GROUP BY model
+    """)
+    suspend fun recentByModel(): List<RecentModelUsage>
 
     @Query("SELECT COUNT(*) FROM usage_records WHERE ts >= :since")
     suspend fun callCountSince(since: Long): Long

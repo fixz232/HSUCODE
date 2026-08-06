@@ -35,7 +35,7 @@ private val Mono = FontFamily(Font(R.font.jetbrains_mono, FontWeight.Normal))
 
 /**
  * Git 接入:两条路都备上——
- *  1) Git 授权(CLI):存 GitHub 用户名/邮箱/PAT,一键写进内置 Ubuntu 环境的 git 配置 + 凭证,
+ *  1) Git 授权(CLI):存 GitHub 用户名/邮箱/PAT,一键写进免 Root Ubuntu 环境的 git 配置 + 凭证,
  *     之后 AI 用终端/env_exec 就能 clone/push 私有仓库。
  *  2) Git MCP:用同一个 token 一键添加 GitHub 官方 MCP 服务器(stdio:npx server-github),
  *     去 MCP 页连接即可用 GitHub API(仓库/PR/Issue)。
@@ -129,7 +129,7 @@ fun GitConfigScreen(database: AppDatabase, keystore: KeystoreProvider, onBack: (
 
     fun configureEnv() {
         if (busy) return
-        if (!LinuxEnvironment.isReady()) { status = "请先到 设置→环境配置 部署 Linux 环境"; return }
+        if (!WorkspaceRuntime.hasLinux()) { status = "请先到 设置→环境配置 部署免 Root Ubuntu"; return }
         busy = true; status = "配置中…(可在终端页查看)"
         saveSettings()
         scope.launch {
@@ -141,7 +141,12 @@ fun GitConfigScreen(database: AppDatabase, keystore: KeystoreProvider, onBack: (
                 "git config --global credential.helper store; " +
                 "printf 'https://%s:%s@github.com\\n' \"\$U\" \"\$T\" > ~/.git-credentials && chmod 600 ~/.git-credentials && echo GIT_CONFIGURED"
             val r = withContext(Dispatchers.IO) {
-                LinuxEnvironment.runInEnvStreaming(cmd) { line -> LinuxEnvironment.outputSink?.invoke(line) }
+                WorkspaceRuntime.runStreaming(cmd) { line ->
+                    when (WorkspaceRuntime.backend()) {
+                        WorkspaceRuntime.Backend.PROOT_UBUNTU -> ProotLinuxEnvironment.outputSink?.invoke(line)
+                        else -> LinuxEnvironment.outputSink?.invoke(line)
+                    }
+                }
             }
             status = if (r.exitCode == 0) "已配置到环境 ✓ 现在 AI 可在终端 git clone/push 了" else "配置失败,退出码 ${r.exitCode}(看终端)"
             busy = false
@@ -173,7 +178,7 @@ fun GitConfigScreen(database: AppDatabase, keystore: KeystoreProvider, onBack: (
             Text("Git 接入", fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = Mono, color = xc.ink)
             Spacer(Modifier.weight(1f))
         }
-        Text("点「登录 GitHub」用你的账户授权即可(无需手动建 Token)。登录后可:添加官方远程 MCP(免 root/免 node)让 AI 直接用 GitHub API 管仓库/PR/Issue/文件,或配置到 Linux 环境走终端 git。",
+        Text("点「登录 GitHub」用你的账户授权即可(无需手动建 Token)。登录后可:添加官方远程 MCP(免 root/免 node)让 AI 直接用 GitHub API 管仓库/PR/Issue/文件,或配置到免 Root Ubuntu 环境走终端 git。",
             fontSize = 11.sp, fontFamily = Mono, color = xc.sub, modifier = Modifier.padding(horizontal = 16.dp))
 
         // —— OAuth 登录 ——
@@ -211,7 +216,7 @@ fun GitConfigScreen(database: AppDatabase, keystore: KeystoreProvider, onBack: (
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Btn(if (loggingIn) "登录中…(等待网页授权)" else "登录 GitHub(OAuth,免建 Token)", xc.green, !loggingIn) { loginOAuth() }
             Btn("② 添加官方远程 MCP(免 root/免 node,推荐)", xc.green.copy(alpha = 0.85f), true) { addRemoteGithubMcp() }
-            Btn(if (busy) "配置中…" else "① 配置到 Linux 环境(终端 git,需 root)", xc.green.copy(alpha = 0.75f), !busy) { configureEnv() }
+            Btn(if (busy) "配置中…" else "① 配置到 Ubuntu 环境(终端 git,免 Root)", xc.green.copy(alpha = 0.75f), !busy) { configureEnv() }
             Btn("③ 添加本地 GitHub MCP(npx,需环境装 node)", xc.green.copy(alpha = 0.6f), true) { addGithubMcp() }
         }
 

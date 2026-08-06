@@ -112,7 +112,7 @@ class SecurityGateImpl(
             // gap-14:su_exec 也按命令风险决定可逆性(而非一律 IRREVERSIBLE),
             // 使 ALLOW_ALL 下普通 root 命令可自动放行、危险 root 命令强制确认。
             "su_exec" -> classifyShellCommand(toolName, toolArgs).copy(capability = Capability.SYSTEM)
-            "shell_exec" -> classifyShellCommand(toolName, toolArgs)
+            "shell_exec", "env_exec" -> classifyShellCommand(toolName, toolArgs)
             "file_read" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "只读文件操作，可逆")
             "file_write" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "文件写入可回滚")
             "file_edit", "multi_edit" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "文件局部编辑可回滚")
@@ -229,7 +229,7 @@ class SecurityGateImpl(
 
         val isReadOnlyTool = cmd.toolName in READ_ONLY_TOOLS
         // gap-13:shell_exec 的只读安全命令(且无写重定向)视为安全。
-        val isSafeShell = cmd.toolName == "shell_exec" && isSafeReadOnlyCommand(command)
+        val isSafeShell = cmd.toolName in setOf("shell_exec", "env_exec") && isSafeReadOnlyCommand(command)
         val safe = isReadOnlyTool || isSafeShell
 
         return when (mode) {
@@ -291,7 +291,7 @@ class SecurityGateImpl(
         sb.appendLine("工具: ${cmd.toolName}")
         sb.appendLine("参数: ${cmd.toolArgs}")
         when (cmd.toolName) {
-            "shell_exec", "su_exec" -> {
+            "shell_exec", "su_exec", "env_exec" -> {
                 val cmdText = try { JSONObject(cmd.toolArgs).optString("command", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
                 sb.appendLine("命令: $cmdText")
                 if (cmd.toolName == "su_exec") {
@@ -364,7 +364,7 @@ class SecurityGateImpl(
     // ---- private helpers ----
 
     private fun extractCommand(cmd: GateCommand): String = when (cmd.toolName) {
-        "shell_exec", "su_exec" -> {
+        "shell_exec", "su_exec", "env_exec" -> {
             try { JSONObject(cmd.toolArgs).optString("command", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
         }
         "file_read", "file_write" -> {

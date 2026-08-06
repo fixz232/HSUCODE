@@ -50,6 +50,8 @@ class SelfProtectTest {
         assertFalse(SelfProtect.isProtected("$pkgDir/files/ubuntu/bin/sh"))
         assertNull(SelfProtect.refuse("$pkgDir/files/ubuntu/bin/sh"))
         assertNull(SelfProtect.refuseCommand("chmod -R 755 $pkgDir/files/ubuntu"))
+        assertFalse(SelfProtect.isProtected("$pkgDir/files/proot-linux/rootfs/bin/sh"))
+        assertNull(SelfProtect.refuseCommand("chmod -R 755 $pkgDir/files/proot-linux/rootfs"))
     }
 
     @Test

@@ -1,11 +1,13 @@
 package com.hsucode.app
 
 import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 「环境配置」内置开发环境/工具的目录 + 安装引擎。
  *
- * 运行在 [LinuxEnvironment] 提供的内置 Ubuntu(apt)用户态里(root + chroot)。检测与安装命令都在
+ * 运行在 [WorkspaceRuntime] 提供的 Ubuntu(apt)用户态里，默认无需 Root。检测与安装命令都在
  * 该环境内执行:检测用 `command -v`,安装统一走 apt / 语言官方安装器。环境未部署时,UI 先引导部署。
  */
 
@@ -17,7 +19,9 @@ data class EnvTool(
     /** 环境内检测是否已安装:退出码 0 = 已安装。 */
     val detectCmd: String,
     /** 环境内安装命令(在 Ubuntu 里执行)。 */
-    val installCmd: String
+    val installCmd: String,
+    /** 首次配置默认勾选。大型/可选工具必须由用户明确选择。 */
+    val selectedByDefault: Boolean = false
 )
 
 /** 一组同类工具。 */
@@ -32,7 +36,7 @@ object EnvCatalog {
     val categories: List<EnvCategory> = listOf(
         EnvCategory("Node.js 环境", "Node.js 和前端开发环境", required = true, tools = listOf(
             EnvTool("node", "Node.js", "JavaScript 运行时",
-                "command -v node", "apt-get install -y nodejs npm"),
+                "command -v node", "apt-get install -y nodejs npm", selectedByDefault = true),
             EnvTool("pnpm", "PNPM", "快速的包管理器和 TypeScript",
                 "command -v pnpm",
                 "npm install -g pnpm typescript || (apt-get install -y npm && npm install -g pnpm typescript)")
@@ -40,11 +44,11 @@ object EnvCatalog {
         EnvCategory("Python 环境", "Python 开发环境", required = true, tools = listOf(
             EnvTool("python_link", "Python 链接", "将 python 命令链接到 python3",
                 "command -v python",
-                "apt-get install -y python3 && ln -sf \"\$(command -v python3)\" /usr/local/bin/python"),
+                "apt-get install -y python3 && ln -sf \"\$(command -v python3)\" /usr/local/bin/python", selectedByDefault = true),
             EnvTool("venv", "虚拟环境", "Python 虚拟环境支持",
-                "python3 -m venv --help >/dev/null 2>&1", "apt-get install -y python3-venv"),
+                "python3 -m venv --help >/dev/null 2>&1", "apt-get install -y python3-venv", selectedByDefault = true),
             EnvTool("pip", "Pip", "Python 包管理器",
-                "command -v pip3 || command -v pip", "apt-get install -y python3-pip"),
+                "command -v pip3 || command -v pip", "apt-get install -y python3-pip", selectedByDefault = true),
             EnvTool("uv", "uv", "一个用 Rust 编写的极速 Python 包安装器",
                 "command -v uv",
                 // 走国内 PyPI(/etc/pip.conf 已配清华源;再显式带 -i 兜底)。
@@ -97,40 +101,96 @@ object EnvCatalog {
     )
 
     val allTools: List<EnvTool> get() = categories.flatMap { it.tools }
+    val defaultToolIds: Set<String> get() = allTools.filter { it.selectedByDefault }.mapTo(linkedSetOf()) { it.id }
 }
+
+data class EnvCommandResult(val ok: Boolean, val detail: String)
 
 /** 安装引擎:在内置 Ubuntu 环境(root chroot)内检测/安装,状态经 UI 反馈。 */
 object EnvSetupManager {
     private const val TAG = "EnvSetup"
+    private const val MARKER_PREFIX = "__HSUCODE_ENV__"
+    private const val APT_UPDATE_COMMAND =
+        "export DEBIAN_FRONTEND=noninteractive; " +
+            "apt-get -o Dpkg::Use-Pty=0 -o Acquire::Retries=2 " +
+            "-o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 update"
+    private val installInProgress = AtomicBoolean(false)
 
-    /** 环境内检测单个工具是否已安装(退出码 0)。环境未就绪时一律视为未安装。 */
-    suspend fun isInstalled(tool: EnvTool): Boolean {
-        if (!LinuxEnvironment.isReady()) return false
+    fun isInstalling(): Boolean = installInProgress.get()
+
+    fun beginInstall(): Boolean = installInProgress.compareAndSet(false, true)
+
+    fun endInstall() {
+        installInProgress.set(false)
+    }
+
+    /**
+     * Runs all probes in one guest process. Starting PRoot for every card made the
+     * original page look frozen and could take minutes on slower phones.
+     */
+    suspend fun inspectInstalled(tools: List<EnvTool>): Map<String, Boolean> {
+        val result = ConcurrentHashMap(tools.associate { it.id to false })
+        if (!WorkspaceRuntime.hasLinux() || tools.isEmpty()) return result
+        val command = buildString {
+            tools.forEach { tool ->
+                append("if ( ").append(tool.detectCmd).append(" ) >/dev/null 2>&1; then ")
+                append("printf '").append(MARKER_PREFIX).append(tool.id).append("=1\\n'; ")
+                append("else printf '").append(MARKER_PREFIX).append(tool.id).append("=0\\n'; fi; ")
+            }
+            append("true")
+        }
         return try {
-            LinuxEnvironment.runInEnv(tool.detectCmd).exitCode == 0
-        } catch (e: Exception) {
-            Log.w(TAG, "detect ${tool.id} failed: ${e.message}"); false
+            WorkspaceRuntime.runStreaming(command) { line ->
+                if (!line.startsWith(MARKER_PREFIX)) return@runStreaming
+                val entry = line.removePrefix(MARKER_PREFIX).split('=', limit = 2)
+                if (entry.size == 2 && result.containsKey(entry[0])) result[entry[0]] = entry[1] == "1"
+            }
+            result.toMap()
+        } catch (error: Exception) {
+            Log.w(TAG, "batch environment probe failed", error)
+            result.toMap()
         }
     }
 
-    /** 环境内安装单个工具;返回 (成功, 日志尾部)。安装前确保 apt 索引已更新。输出【流式】进可视终端。 */
+    /** 环境内检测单个工具是否已安装(退出码 0)。Linux 环境未就绪时一律视为未安装。 */
+    suspend fun isInstalled(tool: EnvTool): Boolean {
+        return inspectInstalled(listOf(tool))[tool.id] == true
+    }
+
+    /** Updates package metadata once per user-started batch, with bounded network retries. */
+    suspend fun preparePackageManager(): EnvCommandResult {
+        if (!WorkspaceRuntime.hasLinux()) return EnvCommandResult(false, "Ubuntu 环境尚未部署或验证失败")
+        return runWithTerminalLog("正在更新软件源…", APT_UPDATE_COMMAND)
+    }
+
+    /** 环境内安装单个工具;调用方须先调用 [preparePackageManager]。输出【流式】进可视终端。 */
     suspend fun install(tool: EnvTool): Pair<Boolean, String> {
-        if (!LinuxEnvironment.isReady()) return false to "Linux 环境尚未部署"
+        if (!WorkspaceRuntime.hasLinux()) return false to "Ubuntu 环境尚未部署"
+        val result = runWithTerminalLog("安装 ${tool.name}…", "export DEBIAN_FRONTEND=noninteractive; ${tool.installCmd}")
+        Log.i(TAG, "install ${tool.id}: ok=${result.ok}")
+        return result.ok to result.detail
+    }
+
+    private suspend fun runWithTerminalLog(headline: String, command: String): EnvCommandResult {
         return try {
-            val sink = LinuxEnvironment.outputSink
-            sink?.invoke("\n$ 安装 ${tool.name} …")
-            val tailBuf = StringBuilder()
-            val r = LinuxEnvironment.runInEnvStreaming("apt-get update -y; ${tool.installCmd}") { line ->
-                sink?.invoke(line)
-                tailBuf.append(line).append('\n')
-                if (tailBuf.length > 4000) tailBuf.delete(0, tailBuf.length - 2000)
+            val sink = when (WorkspaceRuntime.backend()) {
+                WorkspaceRuntime.Backend.PROOT_UBUNTU -> ProotLinuxEnvironment.outputSink
+                WorkspaceRuntime.Backend.ROOT_CHROOT -> LinuxEnvironment.outputSink
+                WorkspaceRuntime.Backend.ANDROID_SHELL -> null
             }
-            val ok = r.exitCode == 0
-            Log.i(TAG, "install ${tool.id}: exit=${r.exitCode}")
-            ok to tailBuf.toString().trim().takeLast(500)
-        } catch (e: Exception) {
-            Log.w(TAG, "install ${tool.id} failed: ${e.message}")
-            false to (e.message ?: "未知错误")
+            sink?.invoke("\n$ $headline")
+            val tail = StringBuilder()
+            val execution = WorkspaceRuntime.runStreaming(command) { line ->
+                sink?.invoke(line)
+                tail.append(line).append('\n')
+                if (tail.length > 4_000) tail.delete(0, tail.length - 2_000)
+            }
+            val detail = tail.toString().trim().takeLast(600)
+                .ifBlank { execution.stderr.ifBlank { "命令退出码：${execution.exitCode}" } }
+            EnvCommandResult(execution.exitCode == 0, detail)
+        } catch (error: Exception) {
+            Log.w(TAG, "environment command failed", error)
+            EnvCommandResult(false, error.message ?: "未知错误")
         }
     }
 }

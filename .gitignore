@@ -11,6 +11,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 *.log.backup/
+.impeccable/
 
 *.zip
 /android-sdk/
@@ -22,5 +23,14 @@ keystore.properties
 
 # 交叉编译产物:34MB 的 .so 不进 git,由 CI 每次从 codegraph-kernel/ 源码编出来。
 # 提交进去的话每次重编都是一个新的 34MB blob,仓库体积会失控。
-app/src/main/jniLibs/
+# PRoot 启动器是固定、已审计且在第三方声明中有来源/哈希的运行时依赖，需随源码分发。
+app/src/main/jniLibs/*
+!app/src/main/jniLibs/arm64-v8a/
+app/src/main/jniLibs/arm64-v8a/*
+!app/src/main/jniLibs/arm64-v8a/libproot_exec.so
+!app/src/main/jniLibs/arm64-v8a/libproot_loader.so
+!app/src/main/jniLibs/x86_64/
+app/src/main/jniLibs/x86_64/*
+!app/src/main/jniLibs/x86_64/libproot_exec.so
+!app/src/main/jniLibs/x86_64/libproot_loader.so
 codegraph-kernel/target/

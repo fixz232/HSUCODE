@@ -2,7 +2,7 @@
 
 **纯 Kotlin 原生 Android AI 智能体。** 一个运行在手机上的自主 AI Agent:多供应商接入、工具调用循环、子智能体并行协作、长期记忆、内置 root/Ubuntu 环境与终端,以及像素风「智能体指挥室」实时动画。原生 Android 工程,无跨端框架。
 
-> 版本:**1.11**(versionCode 111) · 许可:**GPL-3.0-or-later**
+> 版本:**1.14**(versionCode 114) · 许可:**GPL-3.0-or-later**（第三方组件按各自许可证）
 
 ---
 
@@ -10,9 +10,11 @@
 
 本项目基于 [kusesad-1122/XINCODE-Public](https://github.com/kusesad-1122/XINCODE-Public) 修改而来。上游仓库地址为 <https://github.com/kusesad-1122/XINCODE-Public>。
 
+本项目部分功能和代码改编自 [AAswordman/Operit](https://github.com/AAswordman/Operit)（LGPL-3.0）与 [rikkahub/rikkahub](https://github.com/rikkahub/rikkahub)（AGPL-3.0）。改编范围、固定提交、许可证全文、直接复制的资源和二进制清单见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 与 [`NOTICE.md`](NOTICE.md)。
+
 - 修改记录与时间:见 [`MODIFICATIONS.md`](MODIFICATIONS.md)。
 - 原始版权、许可证和作者声明均予以保留；不得删除 [`LICENSE`](LICENSE)、第三方许可证或源码中的既有归属声明。
-- 当前修改包含加密全量备份与跨设备恢复、恢复流程集成、智能体任务状态恢复，以及智能体指挥室的运行控制与权限审批。
+- 当前修改包含加密全量备份与跨设备恢复、恢复流程集成、智能体任务状态恢复、智能体指挥室的运行控制与权限审批，以及统一模型中心和智能路由。
 
 ---
 
@@ -21,7 +23,7 @@
 - **智能体核心** — OpenAI 兼容 / DeepSeek / Anthropic 等多供应商,自定义端点与模型清单;工具调用循环 + 结构化输出 + Prompt 缓存纪律。
 - **计划 / 协作模式** — 计划模式可视化任务卡;协作模式下主脑把任务并行派发给多个专职子智能体,汇总回主脑。
 - **指挥室** — 像素风「智能体指挥室」(WebView + HTML5 Canvas),每个子智能体一个工位与像素小人,派活即联动动画。
-- **环境与终端** — root 终端;内置 Ubuntu 环境(root + chroot 自动部署),可直接执行命令;一键部署常用开发环境。
+- **环境与终端** — 默认提供免 Root Android Shell 工作区，Agent 可执行轻量任务并实时显示输出；Root 设备可部署完整 Ubuntu(root + chroot)与常用开发工具。
 - **记忆** — 长期记忆(FTS 全文检索 + 向量语义检索,自动沉淀);普通对话之间**记忆互通**,项目内对话**按项目隔离**;精编两文件记忆(用户画像 / 近况)由后台复盘分身维护。
 - **上下文与成本** — 输入框旁上下文圆环(绿→蓝→黄→红)、实时 token / 缓存命中、可配置压缩阈值、人民币成本显示(缓存感知)。
 - **效率与自动化** — 多引擎联网搜索(必应 / 百度 / 搜狗 / DuckDuckGo 融合 + 正文抓取)、Goal/Work 多任务、定时任务(cron / WorkManager)、语音转写、视觉与深度推理委托副模型。
@@ -109,6 +111,7 @@ cd HSUCODE
 ## 📄 许可与第三方声明
 
 - 本项目主体代码采用 **GNU General Public License v3.0 or later**(见 [`LICENSE`](LICENSE))。
+- 改编自 Operit 和 RikkaHub 的部分代码、资源与二进制按其 LGPL-3.0 / AGPL-3.0 条款保留来源和再分发义务；具体范围以 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 为准。
 - 打包/引用的第三方字体、像素素材与 Maven 依赖,依其各自许可使用,详见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 与 [`licenses/`](licenses/)。
   - JetBrains Mono 字体 — SIL OFL 1.1
   - 角色 sprite(MetroCity)— CC0 1.0
@@ -121,3 +124,5 @@ HSUCODE 在设计过程中参考了多个开源 AI 智能体的公开设计思�
 - [xai-org/grok](https://github.com/xai-org) — 工具调用循环与终端 agent 交互思路
 - [NousResearch](https://github.com/NousResearch) Hermes 系列 — 自进化学习闭环、精编记忆、零上下文工具-RPC 等设计思路
 - [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) — 像素办公室场景灵感与素材来源
+- [AAswordman/Operit](https://github.com/AAswordman/Operit) — 部分智能体工作台、身份卡和 OAuth 功能参考与改编（LGPL-3.0）
+- [rikkahub/rikkahub](https://github.com/rikkahub/rikkahub) — 聊天主页、模型中心、免 Root 工作区及终端能力参考与改编（AGPL-3.0）

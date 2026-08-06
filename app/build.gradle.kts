@@ -23,8 +23,11 @@ android {
         applicationId = "com.hsucode.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = 111          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
-        versionName = "1.11"
+        versionCode = 114          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
+        versionName = "1.14"
+        ndk {
+            abiFilters += setOf("arm64-v8a", "x86_64")
+        }
     }
 
     // 只有在 keystore.properties 真实存在时才建 release 签名配置。
@@ -81,6 +84,14 @@ android {
         // 让 stub 返回默认值而不是抛。(org.json 不靠这个 —— 它挂了真实实现)
         unitTests.isReturnDefaultValues = true
     }
+
+    // Termux terminal-emulator ships the real PTY JNI library. PRoot itself
+    // remains limited to the arm64-v8a and x86_64 launchers bundled above.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {
@@ -106,6 +117,12 @@ dependencies {
     // 定时任务(CronScheduler/CronWorker 依赖 androidx.work.*)。同样别删。
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.room:room-ktx:2.6.1")
+    implementation("com.caverock:androidsvg-aar:1.4")
+
+    // Termux terminal-view 0.118.0 is built from the upstream GPLv3 source
+    // and checked into app/libs so builds do not depend on a local Maven cache.
+    implementation(files("libs/terminal-emulator-0.118.0.aar"))
+    implementation(files("libs/terminal-view-0.118.0.aar"))
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 
