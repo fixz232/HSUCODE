@@ -53,4 +53,5 @@ HSUCODE is a modified work based on the following upstream project:
 - The upstream project's original copyright, author, and license notices are retained.
 - [`LICENSE`](LICENSE) remains the project license and must not be removed or replaced.
 - Third-party license files, including [`codegraph-kernel/LICENSE.codegraph`](codegraph-kernel/LICENSE.codegraph), remain in place.
+- The native CodeGraph kernel and vendored Tree-sitter grammar notices are listed in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md); rebuilds must preserve the per-grammar license files and `Cargo.lock` versions.
 - Existing source-file copyright, license, and author headers must remain intact when files are modified.

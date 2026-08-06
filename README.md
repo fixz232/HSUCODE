@@ -14,6 +14,8 @@
 
 本项目部分功能和代码改编自 [AAswordman/Operit](https://github.com/AAswordman/Operit)（LGPL-3.0）与 [rikkahub/rikkahub](https://github.com/rikkahub/rikkahub)（AGPL-3.0）。改编范围、固定提交、许可证全文、直接复制的资源和二进制清单见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 与 [`NOTICE.md`](NOTICE.md)。
 
+AGPL/LGPL 改编部分的对应源码、资源许可证和构建说明随 `main` 分支一起发布；Release 签名私钥不公开，修改后的构建需要使用自己的签名密钥安装。
+
 - 修改记录与时间:见 [`MODIFICATIONS.md`](MODIFICATIONS.md)。
 - 原始版权、许可证和作者声明均予以保留；不得删除 [`LICENSE`](LICENSE)、第三方许可证或源码中的既有归属声明。
 - 当前修改包含加密全量备份与跨设备恢复、恢复流程集成、智能体任务状态恢复、智能体指挥室的运行控制与权限审批，以及统一模型中心和智能路由。
@@ -113,6 +115,7 @@ cd HSUCODE
 ## 📄 许可与第三方声明
 
 - 本项目主体代码采用 **GNU General Public License v3.0 or later**(见 [`LICENSE`](LICENSE))。
+- `codegraph-kernel` 原生库及其中的 Tree-sitter 语法源码按各自 MIT/上游许可证发布，许可证文件保留在 `codegraph-kernel/`。
 - 改编自 Operit 和 RikkaHub 的部分代码、资源与二进制按其 LGPL-3.0 / AGPL-3.0 条款保留来源和再分发义务；具体范围以 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 为准。
 - 打包/引用的第三方字体、像素素材与 Maven 依赖,依其各自许可使用,详见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 与 [`licenses/`](licenses/)。
   - JetBrains Mono 字体 — SIL OFL 1.1
@@ -129,6 +132,7 @@ cd HSUCODE
 | [AAswordman/Operit](https://github.com/AAswordman/Operit) | 身份/角色卡、GitHub OAuth 设备流、部分智能体工作台能力 | 部分代码改编与功能参考；LGPL-3.0 |
 | [rikkahub/rikkahub](https://github.com/rikkahub/rikkahub) | 聊天主页与模型中心交互、供应商图标、免 Root 工作区、PRoot/PTY 接入 | 部分代码改编；资源和二进制按 AGPL-3.0 声明 |
 | [termux/termux-app](https://github.com/termux/termux-app) | Termux terminal-emulator / terminal-view PTY 运行时 | 依赖其 GPLv3 与终端模拟器例外条款 |
+| [CodeGraph / Tree-sitter](https://github.com/tree-sitter/tree-sitter) | 原生代码索引与多语言解析内核 | `codegraph-kernel` 自有代码 MIT；各语法和 Rust crate 按上游许可证 |
 | [xai-org/grok](https://github.com/xai-org) | 工具调用循环、终端 Agent 交互思路 | 公开设计思路参考 |
 | [NousResearch](https://github.com/NousResearch) Hermes 系列 | 自进化学习、精编记忆、工具 RPC 等设计思路 | 公开设计思路参考 |
 | [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents) | 像素办公室地板、家具、装饰和场景灵感 | 部分素材按 MIT 声明 |

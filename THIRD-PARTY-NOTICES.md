@@ -2,6 +2,12 @@
 
 HSUCODE 主体代码采用 **GPL-3.0-or-later** 许可(见 LICENSE)。除此之外,以下第三方素材与依赖被打包/引用,依其各自许可协议使用与再分发。
 
+## 上游 XINCODE-Public / Upstream Base
+
+- 项目：[kusesad-1122/XINCODE-Public](https://github.com/kusesad-1122/XINCODE-Public)。HSUCODE 是其修改版，原始版权、GPL 许可证和源码归属继续保留。
+- 本次同步和适配参考的上游提交包括 `28dc9eb`（v1.13 基线）与 `857fc83accd3ff8f26507c101b8cdf6b0064c849`（内置 6 个 Skill 与预制团队）。
+- `app/src/main/assets/skills/` 中的 `LSPosed-Mod-Dev`、`android-apk-builder`、`apk-update-skill`、`apktool-tool`、`ghidra-analysis`、`security-code-auditor` 及其导入器来自上述上游功能，已迁移到 `com.hsucode` 包名。
+
 ## 字体 / Fonts
 
 - **JetBrains Mono** — Copyright 2020 The JetBrains Mono Project Authors。
@@ -66,7 +72,8 @@ HSUCODE 主体代码采用 **GPL-3.0-or-later** 许可(见 LICENSE)。除此之�
   `termux/termux-app` v0.118.0 source tree
   ([source](https://github.com/termux/termux-app/tree/v0.118.0)). The terminal
   emulator is GPLv3-only with the upstream Apache-2.0 terminal-emulator
-  exception; see [`licenses/Termux-GPL-3.0.md`](licenses/Termux-GPL-3.0.md)
+  exception; see [`licenses/Termux-GPL-3.0.md`](licenses/Termux-GPL-3.0.md),
+  [`licenses/Termux-shared-LICENSE.md`](licenses/Termux-shared-LICENSE.md)
   and the upstream source notices.
   - Bundled artifacts: `app/libs/terminal-emulator-0.118.0.aar` and
     `app/libs/terminal-view-0.118.0.aar`.
@@ -77,6 +84,17 @@ HSUCODE 主体代码采用 **GPL-3.0-or-later** 许可(见 LICENSE)。除此之�
     `TermuxPtyTerminal.kt` and `ProotLinuxEnvironment.kt` provide the app-side
     session wiring and do not copy the upstream Kotlin UI implementation.
 
+## CodeGraph native kernel / Tree-sitter grammars
+
+- **HSUCODE CodeGraph kernel** — `codegraph-kernel/` is an MIT-licensed Rust
+  JNI library. The complete license and copyright notice are kept in
+  [`codegraph-kernel/LICENSE.codegraph`](codegraph-kernel/LICENSE.codegraph).
+- The kernel vendors generated Tree-sitter parser sources and grammar headers.
+  The per-grammar license files under `codegraph-kernel/grammars/*/LICENSE`
+  are retained in place; `Cargo.lock` records the exact Rust crate versions
+  used to build the native library. Downstream rebuilds must preserve those
+  notices and the upstream licenses of the resolved crates.
+
 ## Maven 依赖 / Maven Dependencies
 
 - **AndroidX & Jetpack Compose**(activity-compose、material3、compose-ui、room、work-runtime-ktx 等)、**Kotlin stdlib / coroutines**、**OkHttp** — Apache License 2.0
@@ -84,6 +102,9 @@ HSUCODE 主体代码采用 **GPL-3.0-or-later** 许可(见 LICENSE)。除此之�
 - **Rhino**(org.mozilla:rhino:1.7.14) — Mozilla Public License 2.0(弱 copyleft:仅依赖使用只需归属;若修改 Rhino 源码本身需按 MPL 披露被改文件)
 - **AndroidSVG**(com.caverock:androidsvg-aar:1.4) — Apache License 2.0
 - **jsoup**(如引用) — MIT License
+- **CodeGraph Rust / Tree-sitter crates** — each crate's upstream license as
+  recorded by `Cargo.lock`; vendored grammar notices remain under
+  `codegraph-kernel/grammars/`.
 
 各依赖具体版本以 `app/build.gradle.kts`、模块 `build.gradle.kts` 为准。
 
@@ -100,3 +121,9 @@ HSUCODE 在设计过程中参考了多个开源 AI 智能体的公开设计思�
 - [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents)(像素办公室场景灵感与素材来源)
 
 HSUCODE 为纯 Kotlin 原生 Android 实现,并未搬运/移植上述任何项目的代码——上述致谢仅表明部分能力思路受其启发(inspired by)。
+
+## Corresponding Source and Installation Information
+
+- 本仓库 `main` 分支提供 HSUCODE 的完整对应源码、第三方许可证、资源来源、Room schema、PRoot 启动器源码/哈希和终端 AAR 来源；Release APK 不包含仓库未公开的应用源码。
+- AGPL-3.0/ LGPL-3.0 改编部分的对应源码可在本仓库及 `NOTICE.md`、`MODIFICATIONS.md` 指定的固定提交中取得。
+- Release APK 使用维护者本地签名密钥签名；仓库不发布私钥。修改源码后请使用自己的密钥构建，不能覆盖安装为维护者签名的版本，需卸载旧包或使用独立 applicationId。
