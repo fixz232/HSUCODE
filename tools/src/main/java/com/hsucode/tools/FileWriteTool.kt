@@ -25,7 +25,7 @@ class FileWriteTool : Tool {
         put("properties", JSONObject().apply {
             put("path", JSONObject().apply {
                 put("type", "string")
-                put("description", "File path to write (relative to workspace or absolute within workspace)")
+                put("description", "File path to write (relative to the current workspace, or an absolute Android path)")
             })
             put("content", JSONObject().apply {
                 put("type", "string")
@@ -39,7 +39,7 @@ class FileWriteTool : Tool {
         val path = params["path"] ?: return@withContext ToolResult.Error("缺少 path 参数")
         val content = params["content"] ?: return@withContext ToolResult.Error("缺少 content 参数")
         val safePath = PathResolver.resolve(path)
-            ?: return@withContext ToolResult.Error("路径不在工作区内: $path")
+            ?: return@withContext ToolResult.Error("无法解析路径: $path")
         // 不让 AI 改 App 自己的运行时数据 —— 动了 databases/ 下次启动就打不开库,
         // 用户的会话、身份卡、供应商配置、记忆全没。见 SelfProtect。
         SelfProtect.refuse(safePath)?.let { return@withContext ToolResult.Error(it) }

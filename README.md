@@ -2,7 +2,7 @@
 
 **纯 Kotlin 原生 Android AI 智能体。** 一个运行在手机上的自主 AI Agent:多供应商接入、工具调用循环、子智能体并行协作、长期记忆、内置 root/Ubuntu 环境与终端,以及像素风「智能体指挥室」实时动画。原生 Android 工程,无跨端框架。
 
-> 版本:**1.17**(versionCode 117) · 许可:**GPL-3.0-or-later**（第三方组件按各自许可证）
+> 版本:**1.20**(versionCode 120) · 许可:**GPL-3.0-or-later**（第三方组件按各自许可证）
 
 源码仓库：[fixz232/HSUCODE](https://github.com/fixz232/HSUCODE) · 默认分支：`main`
 
@@ -37,7 +37,7 @@ HSUCODE 是本地运行的开发者工具，不是托管 AI 服务，也不提�
 
 ## ✨ 主要能力
 
-- **智能体核心** — OpenAI 兼容 / DeepSeek / Anthropic 等多供应商,自定义端点与模型清单;工具调用循环 + 结构化输出 + Prompt 缓存纪律。
+- **智能体核心** — OpenAI Chat Completions / Responses API / DeepSeek / Anthropic 等多供应商,自定义端点与模型清单;工具调用循环 + 结构化输出 + Prompt 缓存纪律。
 - **计划 / 协作模式** — 计划模式可视化任务卡;协作模式下主脑把任务并行派发给多个专职子智能体,汇总回主脑。
 - **指挥室** — 像素风「智能体指挥室」(WebView + HTML5 Canvas),每个子智能体一个工位与像素小人,派活即联动动画。
 - **环境与终端** — 默认提供免 Root Android Shell 工作区，Agent 可执行轻量任务并实时显示输出；Root 设备可部署完整 Ubuntu(root + chroot)与常用开发工具。

@@ -14,6 +14,13 @@ HSUCODE is a modified work based on the following upstream project:
 
 ## Modification Log
 
+### 2026-08-14 (UTC+08:00) - Upstream v1.20 Synchronization
+
+- Merged `kusesad-1122/XINCODE-Public` through upstream commit `d1d984e` after the v1.20 release, while retaining HSUCODE-specific application identifiers, UI workbench, backup/recovery, security, and rootless workspace functionality.
+- Added the upstream OpenAI Responses API request/SSE parsing implementation, group-room message/summary data support, per-session model-selection helpers, memory/Skill lifecycle helpers, provider assets, and their accompanying notices. HSUCODE retains its own Compose UI and local workbench integration where it has diverged from upstream.
+- Rebranded all synchronized source namespaces from `com.xincode` to `com.hsucode`; no upstream signing key, local configuration, or generated APK is included in source control.
+- Prepared the corresponding HSUCODE `1.20` (versionCode 120) source release. The signed APK is produced and verified separately from this source tree.
+
 ### 2026-08-14 (UTC+08:00)
 
 - Reorganized the HSUCODE task workbench, conversation composer, sidebar, and settings information architecture. The resulting Compose UI is HSUCODE-specific work; it preserves attribution for any earlier adapted upstream code and assets listed in `THIRD-PARTY-NOTICES.md`.

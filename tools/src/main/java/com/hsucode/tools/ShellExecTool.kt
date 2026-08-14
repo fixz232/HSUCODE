@@ -5,6 +5,7 @@ import com.hsucode.core.ToolResult
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 /**
  * Executes a shell command.
@@ -52,10 +53,11 @@ class ShellExecTool : Tool {
     private suspend fun executeViaSh(command: String): ToolResult {
         var process: Process? = null
         try {
-            process = ProcessBuilder("sh", "-c", command)
+            val p = ProcessBuilder("sh", "-c", command)
                 .redirectErrorStream(false)
                 .directory(java.io.File(WorkspaceContext.workspaceRoot))
                 .start()
+            process = p
 
             return@executeViaSh withTimeout(TIMEOUT_SECONDS * 1000) {
                 coroutineScope {
@@ -97,6 +99,24 @@ class ShellExecTool : Tool {
             return@executeViaSh ToolResult.Error("执行异常: ${e.message}")
         }
     }
+
+    private fun buildResult(exitCode: Int, stdoutRaw: String, stderrRaw: String): ToolResult {
+        val stdout = stdoutRaw.trim()
+        val stderr = stderrRaw.trim()
+        return if (exitCode == 0) {
+            ToolResult.Success(truncate(stdout, MAX_STDOUT))
+        } else {
+            ToolResult.Error(
+                message = "命令退出码 $exitCode",
+                exitCode = exitCode,
+                stderr = truncate(stderr, MAX_STDERR).ifBlank { "(无 stderr 输出)" }
+            )
+        }
+    }
+
+    private fun truncate(s: String, max: Int): String =
+        if (s.length > max) s.take(max / 2) + "\n[...已截断 ${s.length - max} 字符...]\n" + s.takeLast(max / 2)
+        else s
 
     /** Kill process group to prevent orphan child processes. */
     private fun killProcessGroup(process: Process?) {

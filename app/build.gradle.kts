@@ -23,8 +23,8 @@ android {
         applicationId = "com.hsucode.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = 117          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
-        versionName = "1.17"
+        versionCode = 120          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
+        versionName = "1.20"
         ndk {
             abiFilters += setOf("arm64-v8a", "x86_64")
         }

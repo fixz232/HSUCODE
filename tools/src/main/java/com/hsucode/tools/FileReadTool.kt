@@ -12,7 +12,7 @@ import java.io.File
  *
  * Path is resolved against the active conversation workspace.
  * Relative paths (starting without /) are treated as relative to workspace root.
- * Absolute paths must be within the workspace subtree (no traversal escape).
+ * Absolute paths are accepted and remain subject to Android filesystem permissions.
  */
 class FileReadTool : Tool {
 
@@ -25,7 +25,7 @@ class FileReadTool : Tool {
         put("properties", JSONObject().apply {
             put("path", JSONObject().apply {
                 put("type", "string")
-                put("description", "File path (relative to workspace or absolute within workspace)")
+                put("description", "File path (relative to the current workspace, or an absolute Android path)")
             })
             put("startLine", JSONObject().apply {
                 put("type", "integer")
@@ -46,7 +46,7 @@ class FileReadTool : Tool {
     override suspend fun execute(params: Map<String, String>): ToolResult = withContext(Dispatchers.IO) {
         val path = params["path"] ?: return@withContext ToolResult.Error("缺少 path 参数")
         val safePath = PathResolver.resolve(path)
-            ?: return@withContext ToolResult.Error("路径不在工作区内: $path")
+            ?: return@withContext ToolResult.Error("无法解析路径: $path")
 
         val file = File(safePath)
         if (!file.exists()) return@withContext ToolResult.Error("文件不存在: $path")

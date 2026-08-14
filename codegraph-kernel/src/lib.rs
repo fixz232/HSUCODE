@@ -40,6 +40,11 @@ mod textutil;
 mod python;
 mod tsjs;
 
+// Android has no Node runtime to provide N-API symbols. Keep the upstream Node API in the
+// default `node` feature, while Android's JNI build uses `--no-default-features`.
+#[cfg(feature = "node")]
+mod node_api {
+use super::*;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
