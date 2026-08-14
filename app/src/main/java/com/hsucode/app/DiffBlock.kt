@@ -3,6 +3,7 @@ package com.hsucode.app
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -46,39 +47,41 @@ fun DiffBlock(fileEdit: MessageContent.FileEdit, modifier: Modifier = Modifier) 
         Box(Modifier.fillMaxWidth().height(0.5.dp).background(Border))
 
         // Diff lines
-        Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
-            fileEdit.diffLines.forEach { diffLine ->
-                val prefix = when (diffLine.type) {
+        SelectionContainer {
+            Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                fileEdit.diffLines.forEach { diffLine ->
+                    val prefix = when (diffLine.type) {
                     DiffType.ADD -> "+"
                     DiffType.DELETE -> "-"
                     DiffType.CONTEXT -> " "
                 }
-                val textColor = when (diffLine.type) {
+                    val textColor = when (diffLine.type) {
                     DiffType.ADD -> Green
                     DiffType.DELETE -> Red
                     DiffType.CONTEXT -> Sub
                 }
-                val bgColor = when (diffLine.type) {
+                    val bgColor = when (diffLine.type) {
                     DiffType.ADD -> GreenBg
                     DiffType.DELETE -> RedBg
                     DiffType.CONTEXT -> Color.Transparent
                 }
-                Row(
-                    Modifier.fillMaxWidth().background(bgColor)
-                ) {
-                    Text(
-                        prefix,
-                        fontSize = 11.sp,
-                        fontFamily = JetBrainsMono,
-                        color = textColor,
-                        modifier = Modifier.width(12.dp)
-                    )
-                    Text(
-                        diffLine.content,
-                        fontSize = 11.sp,
-                        fontFamily = JetBrainsMono,
-                        color = textColor
-                    )
+                    Row(
+                        Modifier.fillMaxWidth().background(bgColor)
+                    ) {
+                        Text(
+                            prefix,
+                            fontSize = 11.sp,
+                            fontFamily = JetBrainsMono,
+                            color = textColor,
+                            modifier = Modifier.width(12.dp)
+                        )
+                        Text(
+                            diffLine.content,
+                            fontSize = 11.sp,
+                            fontFamily = JetBrainsMono,
+                            color = textColor
+                        )
+                    }
                 }
             }
         }

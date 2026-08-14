@@ -21,4 +21,25 @@ class EnvCatalogTest {
 
         assertTrue(EnvCatalog.defaultToolIds.all { it in ids })
     }
+
+    @Test
+    fun uvInstallAvoidsPep668SystemPythonWrite() {
+        val uv = EnvCatalog.allTools.first { it.id == "uv" }
+
+        assertTrue(uv.installCmd.contains("python3 -m venv /opt/hsucode-uv"))
+        assertTrue(uv.installCmd.contains("/opt/hsucode-uv/bin/python -m pip"))
+        assertFalse(uv.installCmd.contains("pip3 install -U uv"))
+    }
+
+    @Test
+    fun optionalInstallCommandsRecoverFromPartialSetup() {
+        val byId = EnvCatalog.allTools.associateBy { it.id }
+
+        assertTrue(byId.getValue("pnpm").installCmd.startsWith("apt-get install -y nodejs npm"))
+        assertTrue(byId.getValue("pnpm").detectCmd.contains("npm root -g"))
+        assertTrue(byId.getValue("pnpm").installCmd.contains("npm config delete registry"))
+        assertTrue(byId.getValue("venv").detectCmd.contains("import ensurepip"))
+        assertFalse(byId.getValue("rust").installCmd.contains("/root/.cargo/bin/*"))
+        assertTrue(byId.getValue("android_ndk").installCmd.contains("test -x /opt/android-sdk/cmdline-tools/cmdline-tools/bin/sdkmanager"))
+    }
 }

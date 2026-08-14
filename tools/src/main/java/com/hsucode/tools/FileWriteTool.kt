@@ -10,14 +10,15 @@ import java.io.File
 /**
  * Creates or overwrites a file within the workspace.
  *
- * Path must resolve within /storage/emulated/0/HSUCODE.
+ * Path must resolve within the active conversation workspace.
  * Parent directories are created automatically.
  */
 class FileWriteTool : Tool {
 
     override val name = "file_write"
-    override val description = "Create or overwrite a file. Path must be within workspace " +
-            "(/storage/emulated/0/HSUCODE). Parent directories are created automatically."
+    override val description = "Create or overwrite a file in the active conversation workspace. " +
+            "Use a relative path; do not use a fixed legacy directory. Parent directories are created automatically. " +
+            "The result is also copied to the phone's Download/HSUCODE/date folder."
 
     override val parametersSchema: JSONObject = JSONObject().apply {
         put("type", "object")
@@ -49,10 +50,11 @@ class FileWriteTool : Tool {
             if (file.exists() && file.isDirectory) {
                 return@withContext ToolResult.Error("路径是目录，不能作为文件写入: $path")
             }
-            // Create parent directories
-            file.parentFile?.mkdirs()
-            file.writeText(content)
-            ToolResult.Success("已写入 ${file.length()} 字节 → $path")
+            SafeWorkspaceFiles.writeTextAtomically(file, content)
+            val published = WorkspaceContext.publishChatFile(file)
+            val destination = published?.let { "；已同步到手机 $it" }
+                ?: "；下载目录同步失败，工作区副本已保留"
+            ToolResult.Success("已写入 ${file.length()} 字节 → $path$destination")
         } catch (e: Exception) {
             ToolResult.Error("写入异常: ${e.message}")
         }

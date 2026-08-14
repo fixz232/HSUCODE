@@ -123,6 +123,8 @@ fun SupplierConfigScreen(
     var pendingActivateId by remember { mutableStateOf<Long?>(null) }  // warn before activating
     var pendingDelete by remember { mutableStateOf<ProviderConfigEntity?>(null) }
     var editingApiKey by remember { mutableStateOf("") }  // decrypted stored key for live fetch during edit
+    // Never silently reuse a credential after the endpoint, supplier, or protocol changes.
+    var editingCredentialScope by remember { mutableStateOf("") }
 
     val selectedSupplier = knownSuppliers.find { it.id == selectedSupplierId } ?: knownSuppliers.last()
     val isCustom = selectedSupplierId == "custom"
@@ -130,6 +132,9 @@ fun SupplierConfigScreen(
     val localNoKeyAllowed = isLocalEndpoint(effectiveBaseUrl)
     // 手填的排在拉取结果前面:刚添加的一眼就能看到,不用在几百个模型里翻。
     val displayModels = (manualModelIds.toList() + models).distinct()
+
+    fun credentialScope(supplierId: String, endpoint: String, apiPathType: String): String =
+        listOf(supplierId.trim(), endpoint.trim().trimEnd('/'), apiPathType.trim()).joinToString("|")
 
     fun loadConfigs() {
         scope.launch {
@@ -180,6 +185,7 @@ fun SupplierConfigScreen(
         editingConfig = null; configName = ""; selectedSupplierId = "deepseek"
         baseUrl = ""; apiKey = ""; model = ""; models = emptyList()
         editingApiKey = ""; checkedModelIds = emptySet(); selectedApiPathType = "openai"
+        editingCredentialScope = ""
         manualModelIds = emptySet(); newModelId = ""
         capVision = false; capAudio = false; capVideo = false; capToolCall = true
         contextWindowText = ""; compactThresholdText = "85"; extraHeadersText = ""
@@ -205,6 +211,7 @@ fun SupplierConfigScreen(
         editingApiKey = try {
             keystore.decrypt(Base64.decode(cfg.apiKeyEnc, Base64.NO_WRAP))
         } catch (_: Exception) { "" }
+        editingCredentialScope = credentialScope(cfg.supplierId, cfg.baseUrl, cfg.apiPathType)
         showForm = true; status = ""
     }
 
@@ -215,7 +222,12 @@ fun SupplierConfigScreen(
         }
         modelsLoading = true; status = ""
         scope.launch {
-            val r = openAiClient.listModels(effectiveBaseUrl, key)
+            val r = openAiClient.listModels(
+                effectiveBaseUrl,
+                key,
+                selectedApiPathType,
+                extraHeadersText.trim()
+            )
             models = r.getOrDefault(emptyList())
             modelsLoading = false
             if (models.isEmpty()) status = "✗ 拉取失败或无可用模型，可在下方手动填写模型 ID"
@@ -257,10 +269,17 @@ fun SupplierConfigScreen(
             model = checkedModelIds.first()  // auto-select first if none active
         }
         val name = configName.ifBlank { selectedSupplier.name }
+        val currentCredentialScope = credentialScope(selectedSupplierId, url, selectedApiPathType)
+        val canReuseStoredKey = editingConfig != null && editingCredentialScope == currentCredentialScope
+        if (apiKey.isBlank() && editingConfig != null && !canReuseStoredKey && !localNoKeyAllowed) {
+            status = "✗ 已修改供应商、端点或协议，请重新填写 api_key"; return
+        }
         val keyEnc = if (apiKey.isNotBlank()) {
             Base64.encodeToString(keystore.encrypt(apiKey), Base64.NO_WRAP)
-        } else {
+        } else if (canReuseStoredKey) {
             editingConfig?.apiKeyEnc ?: ""
+        } else {
+            ""
         }
         scope.launch {
             val entity = ProviderConfigEntity(
@@ -675,6 +694,7 @@ fun SupplierConfigScreen(
             )
         }
     }
+
 }
 
 /** 能力开关行:左侧标题+说明,右侧开关。说明文字随开关状态变化,让后果当场可见。 */

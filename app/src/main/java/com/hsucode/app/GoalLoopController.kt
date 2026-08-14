@@ -27,6 +27,7 @@ class GoalLoopController(
     private val sessionId: Long,
     private val chat: AgentChatState,
     private val database: AppDatabase,
+    private val taskRuntime: TaskRuntimeManager? = null,
     private val judgeFactory: () -> JudgeService,
     private val appScope: CoroutineScope,
     private val maxRounds: Int = 8,
@@ -85,11 +86,11 @@ class GoalLoopController(
     private suspend fun runLoop(goal: String, initialRound: Int, resumePhase: String?) {
         val judge = judgeFactory()
         setStatus("running", if (initialRound > 0) "恢复第 $initialRound 轮…" else "第 1 轮:执行中…")
+        var round = initialRound
         try {
-            var round = initialRound
             var continueWithJudge = initialRound > 0 && resumePhase in setOf("executing", "judging")
-            if (continueWithJudge && chat.isStreaming.value) {
-                waitUntil(perRoundTimeoutMs) { !chat.isStreaming.value }
+            if (continueWithJudge && chat.isStreaming.value && !waitUntil(perRoundTimeoutMs) { !chat.isStreaming.value }) {
+                throw GoalRoundTimeout("恢复的上一轮在限定时间内未结束")
             }
             while (round < maxRounds || continueWithJudge) {
                 if (!continueWithJudge) {
@@ -126,6 +127,11 @@ class GoalLoopController(
             onDone(sessionId, false, lastJudgeExplanation.ifBlank { "达最大轮数未达成" }.take(140))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
+        } catch (e: GoalRoundTimeout) {
+            // Keep the cursor so a user can explicitly resume instead of judging stale output as success.
+            persistRecovery(goal, round, "timed_out")
+            setStatus("failed", "✗ 第 $round 轮超时，可在任务恢复中继续")
+            onDone(sessionId, false, e.message.orEmpty().take(120))
         } catch (e: Exception) {
             Log.e(TAG, "goal loop error: ${e.message}", e)
             clearRecovery()
@@ -158,22 +164,31 @@ class GoalLoopController(
     /** 发一条消息并等这一轮完全跑完(含所有工具迭代)。 */
     private suspend fun runOneTurn(prompt: String) {
         // 等上一轮彻底空闲(保险)。
-        waitUntil(15_000) { !chat.isStreaming.value }
+        if (!waitUntil(15_000) { !chat.isStreaming.value }) {
+            throw GoalRoundTimeout("上一轮仍在执行，未能安全开始下一轮")
+        }
         chat.input.value = prompt
         chat.send()
         // 等本轮开始(send 之后 isStreaming 置真有极短延迟)。
-        waitUntil(8_000) { chat.isStreaming.value }
+        if (!waitUntil(8_000) { chat.isStreaming.value }) {
+            throw GoalRoundTimeout("本轮未能启动，请检查模型连接或权限审批")
+        }
         // 等本轮结束。
-        waitUntil(perRoundTimeoutMs) { !chat.isStreaming.value }
-    }
-
-    private suspend fun waitUntil(timeoutMs: Long, cond: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (cond()) return
-            delay(500)
+        if (!waitUntil(perRoundTimeoutMs) { !chat.isStreaming.value }) {
+            throw GoalRoundTimeout("本轮执行超时")
         }
     }
+
+    private suspend fun waitUntil(timeoutMs: Long, cond: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (cond()) return true
+            delay(500)
+        }
+        return cond()
+    }
+
+    private class GoalRoundTimeout(message: String) : IllegalStateException(message)
 
     private fun lastAssistantOutput(): String =
         chat.messages.lastOrNull { it.role == "assistant" && it.content.isNotBlank() }?.content?.take(4000)
@@ -181,6 +196,14 @@ class GoalLoopController(
 
     private suspend fun setStatus(status: String, text: String) {
         onStatus(sessionId, text)
+        taskRuntime?.updateExternal(
+            ownerKey = "goal:$sessionId",
+            type = "goal",
+            title = "目标任务 #$sessionId",
+            status = when (status) { "running" -> TaskRunStatus.RUNNING; "achieved" -> TaskRunStatus.SUCCEEDED; else -> TaskRunStatus.FAILED },
+            detail = text,
+            progress = if (status == "achieved") 100 else 0
+        )
         withContext(Dispatchers.IO) {
             try { database.sessionDao().setGoalStatus(sessionId, status) } catch (_: Exception) {}
         }

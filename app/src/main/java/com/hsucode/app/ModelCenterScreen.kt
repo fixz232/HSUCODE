@@ -1,6 +1,7 @@
 package com.hsucode.app
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,7 +16,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.hsucode.data.AppDatabase
 import com.hsucode.provider.OpenAiClient
 import com.hsucode.security.KeystoreProvider
@@ -33,17 +33,29 @@ fun ModelCenterScreen(
 ) {
     val xc = LocalHsuColors.current
     var selected by rememberSaveable { mutableStateOf(ModelCenterTab.SUPPLIERS) }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxSize().background(xc.bg)) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回", tint = xc.ink) }
-            Text("模型中心", fontSize = 20.sp, color = xc.ink, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                Text("模型中心", style = androidx.compose.material3.MaterialTheme.typography.titleLarge, color = xc.ink)
+                Text("管理连接、模型能力与调用分配", style = androidx.compose.material3.MaterialTheme.typography.bodySmall, color = xc.sub)
+            }
         }
         LazyRow(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(ModelCenterTab.values().toList()) { tab ->
-                FilterChip(selected = selected == tab, onClick = { selected = tab }, label = { Text(tab.label) }, shape = RoundedCornerShape(8.dp))
+                FilterChip(
+                    selected = selected == tab,
+                    onClick = { selected = tab },
+                    label = { Text(tab.label) },
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.heightIn(min = 48.dp)
+                )
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {

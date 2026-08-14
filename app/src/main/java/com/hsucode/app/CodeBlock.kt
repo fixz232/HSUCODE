@@ -7,6 +7,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -54,23 +55,25 @@ fun CodeBlock(fileRead: MessageContent.FileRead, modifier: Modifier = Modifier) 
         Box(Modifier.fillMaxWidth().height(0.5.dp).background(Border))
 
         // Content with line numbers
-        Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
-            displayLines.forEachIndexed { idx, line ->
-                Row {
-                    Text(
-                        "${fileRead.startLine + idx}",
-                        fontSize = 10.sp,
-                        fontFamily = JetBrainsMono,
-                        color = Faint,
-                        modifier = Modifier.width(lineNumWidth)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        line,
-                        fontSize = 11.sp,
-                        fontFamily = JetBrainsMono,
-                        color = Ink
-                    )
+        SelectionContainer {
+            Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                displayLines.forEachIndexed { idx, line ->
+                    Row {
+                        Text(
+                            "${fileRead.startLine + idx}",
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMono,
+                            color = Faint,
+                            modifier = Modifier.width(lineNumWidth)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            line,
+                            fontSize = 11.sp,
+                            fontFamily = JetBrainsMono,
+                            color = Ink
+                        )
+                    }
                 }
             }
         }

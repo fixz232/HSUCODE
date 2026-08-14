@@ -7,6 +7,9 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.regex.Pattern
 import java.util.zip.ZipInputStream
 
@@ -72,14 +75,29 @@ object WorkspaceFileOps {
         require(relativePath.isNotBlank()) { "文件名不能为空" }
         val file = resolve(root, relativePath).getOrThrow()
         require(!file.exists() || file.isFile) { "目标是文件夹" }
-        file.parentFile?.mkdirs()
-        file.writeText(content)
+        atomicWriteText(file, content)
     }
 
     fun createDirectory(root: File, relativePath: String): Result<Unit> = runCatching {
         require(relativePath.isNotBlank()) { "文件夹名不能为空" }
         val directory = resolve(root, relativePath).getOrThrow()
         require(directory.mkdirs() || directory.isDirectory) { "无法创建文件夹" }
+    }
+
+    /** Same-directory replacement keeps an existing document intact if writing is interrupted. */
+    private fun atomicWriteText(file: File, content: String) {
+        file.parentFile?.mkdirs()
+        val partial = File(file.parentFile, ".${file.name}.${System.nanoTime()}.partial")
+        try {
+            partial.writeText(content)
+            try {
+                Files.move(partial.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(partial.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            if (partial.exists()) partial.delete()
+        }
     }
 
     fun delete(root: File, relativePath: String): Result<Unit> = runCatching {

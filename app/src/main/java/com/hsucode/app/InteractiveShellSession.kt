@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger
 internal class InteractiveShellSession(
     private val process: Process,
     private val onOutput: (String) -> Unit,
-) : Closeable {
+) : Closeable, CommandSession {
     private companion object { const val MAX_CAPTURE_CHARS = 12_000 }
     private val writer = BufferedWriter(OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8))
     private val markerCounter = AtomicInteger(0)
@@ -57,10 +57,10 @@ internal class InteractiveShellSession(
         }
     }
 
-    suspend fun execute(command: String): Int = executeWithOutput(command).exitCode
+    override suspend fun execute(command: String): Int = executeWithOutput(command).exitCode
 
     /** Executes one command and returns the output observed before the completion marker. */
-    suspend fun executeWithOutput(command: String): Result {
+    override suspend fun executeWithOutput(command: String): CommandSession.CommandResult {
         val commandText = command.trimEnd()
         require(commandText.isNotBlank()) { "命令不能为空" }
         val marker = "__HSUCODE_DONE_${markerCounter.incrementAndGet()}__"
@@ -82,7 +82,7 @@ internal class InteractiveShellSession(
             }
         }
         return try {
-            Result(deferred.await(), output.toString())
+                CommandSession.CommandResult(deferred.await(), output.toString())
         } catch (cancelled: CancellationException) {
             close()
             throw cancelled
@@ -90,7 +90,7 @@ internal class InteractiveShellSession(
     }
 
     /** Sends a byte sequence directly to the shell stdin (TAB, ESC, arrows, etc.). */
-    fun send(bytes: ByteArray) {
+    override fun send(bytes: ByteArray) {
         synchronized(lock) {
             if (closed) return
             runCatching {
@@ -100,7 +100,7 @@ internal class InteractiveShellSession(
         }
     }
 
-    fun isAlive(): Boolean = !closed && process.isAlive
+    override fun isAlive(): Boolean = !closed && process.isAlive
 
     override fun close() {
         synchronized(lock) {
@@ -123,8 +123,6 @@ internal class InteractiveShellSession(
             closed = true
         }
     }
-
-    data class Result(val exitCode: Int, val output: String)
 
     private data class Pending(
         val marker: String,

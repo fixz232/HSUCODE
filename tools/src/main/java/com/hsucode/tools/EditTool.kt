@@ -57,13 +57,15 @@ class EditTool : Tool {
 
         // old_string 空 → 新建文件
         if (oldStr.isEmpty()) {
-            if (file.exists() && file.isFile && file.readText().isNotEmpty()) {
+            if (file.exists() && file.isFile && SafeWorkspaceFiles.readEditableText(file).isNotEmpty()) {
                 return@withContext ToolResult.Error("old_string 为空表示新建文件,但 $path 已存在且非空;请提供要替换的 old_string。")
             }
             return@withContext try {
-                file.parentFile?.mkdirs()
-                file.writeText(newStr)
-                ToolResult.Success("已新建文件 $path(${newStr.length} 字符)")
+                SafeWorkspaceFiles.writeTextAtomically(file, newStr)
+                val published = WorkspaceContext.publishChatFile(file)
+                val destination = published?.let { "；已同步到手机 $it" }
+                    ?: "；下载目录同步失败，工作区副本已保留"
+                ToolResult.Success("已新建文件 $path(${newStr.length} 字符)$destination")
             } catch (e: Exception) {
                 ToolResult.Error("新建失败: ${e.message}")
             }
@@ -72,7 +74,11 @@ class EditTool : Tool {
         if (oldStr == newStr) return@withContext ToolResult.Error("old_string 与 new_string 相同,无需编辑")
         if (!file.exists() || !file.isFile) return@withContext ToolResult.Error("文件不存在或不是普通文件: $path")
 
-        val original = file.readText()
+        val original = try {
+            SafeWorkspaceFiles.readEditableText(file)
+        } catch (e: IllegalArgumentException) {
+            return@withContext ToolResult.Error(e.message ?: "文件无法编辑")
+        }
         val count = countOccurrences(original, oldStr)
         when {
             count == 0 -> return@withContext ToolResult.Error("在 $path 中未找到 old_string(0 次);请核对原文精确内容(含空白/缩进)。")
@@ -83,9 +89,12 @@ class EditTool : Tool {
         val updated = if (replaceAll) original.replace(oldStr, newStr)
         else original.replaceFirst(oldStr, newStr)
         return@withContext try {
-            file.writeText(updated)
+            SafeWorkspaceFiles.writeTextAtomically(file, updated)
             val replaced = if (replaceAll) count else 1
-            ToolResult.Success("已替换 $replaced 处 → $path(现 ${updated.length} 字符)\n--- 片段 ---\n${snippet(updated, newStr)}")
+            val published = WorkspaceContext.publishChatFile(file)
+            val destination = published?.let { "；已同步到手机 $it" }
+                ?: "；下载目录同步失败，工作区副本已保留"
+            ToolResult.Success("已替换 $replaced 处 → $path(现 ${updated.length} 字符)$destination\n--- 片段 ---\n${snippet(updated, newStr)}")
         } catch (e: Exception) {
             ToolResult.Error("写入失败: ${e.message}")
         }

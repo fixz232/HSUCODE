@@ -10,7 +10,7 @@ import java.io.File
 /**
  * Lists files and directories at the given path.
  *
- * Path must resolve within /storage/emulated/0/HSUCODE.
+ * Path must resolve within the active conversation workspace.
  * Output format: one entry per line: type + size + name.
  * Sorted alphabetically, directories first.
  */

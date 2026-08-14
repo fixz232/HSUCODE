@@ -12,6 +12,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -30,11 +31,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
-import android.view.HapticFeedbackConstants
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
@@ -67,6 +69,7 @@ import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.AssignmentTurnedIn
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -93,6 +96,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import com.hsucode.app.R
+import com.hsucode.tools.WorkspaceContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -111,13 +115,6 @@ data class Attachment(
     val content: String
 )
 
-private fun assistantSubtitle(assistantName: String, model: String, provider: String): String {
-    val assistant = assistantName.trim().ifBlank { "默认助手" }
-    val modelName = model.trim().ifBlank { "未配置模型" }
-    val providerName = provider.trim()
-    return if (providerName.isBlank()) "$assistant · $modelName" else "$assistant · $providerName / $modelName"
-}
-
 /**
  * 处理选择器返回的一个 URI。**必须在 IO 线程调用**(内部有同步文件读写)。
  *
@@ -135,7 +132,8 @@ private const val INLINE_TEXT_LIMIT = 256 * 1024
 private suspend fun processAttachmentUri(
     context: android.content.Context,
     uri: Uri,
-    pending: MutableState<List<Attachment>>
+    pending: MutableState<List<Attachment>>,
+    workspaceRoot: String
 ) {
     // Toast 必须回主线程弹,否则在 IO 线程上没有 Looper 会直接抛异常。
     suspend fun toast(msg: String, long: Boolean = false) = withContext(Dispatchers.Main) {
@@ -161,14 +159,15 @@ private suspend fun processAttachmentUri(
     val ext = fileName.substringAfterLast('.', "").lowercase()
 
     /** 流式复制到应用私有目录,返回落盘后的文件;失败返回 null。全程不占内存。 */
-    fun copyToPrivate(): java.io.File? {
+    fun copyToWorkspace(): Pair<java.io.File, String>? {
         return try {
-            val dir = java.io.File(context.filesDir, "attachments").apply { mkdirs() }
+            val root = WorkspaceFileOps.root(workspaceRoot.ifBlank { WorkspaceContext.DEFAULT_ROOT }).getOrThrow()
+            val dir = java.io.File(root, ".hsucode-attachments").apply { mkdirs() }
             val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_")
             val dest = java.io.File(dir, "${System.currentTimeMillis()}_$safeName")
             val stream = resolver.openInputStream(uri) ?: return null
             stream.use { input -> dest.outputStream().use { output -> input.copyTo(output) } }
-            dest
+            dest to ".hsucode-attachments/${dest.name}"
         } catch (_: Exception) { null }
     }
 
@@ -176,14 +175,29 @@ private suspend fun processAttachmentUri(
     // 以前图片和文本文件走同一条路,两道坎都过不去:图片扩展名不在白名单里会被拒,
     // 就算放行,reader().readText() 把二进制按 UTF-8 读出来也只是一堆乱码。
     if (mime.startsWith("image/") || ext in imageExts) {
-        val dest = copyToPrivate() ?: run { toast("无法读取图片: $fileName"); return }
+        val (dest, relativePath) = copyToWorkspace() ?: run { toast("无法读取图片: $fileName"); return }
         addAttachment(Attachment(
             fileName = fileName,
-            absolutePath = dest.absolutePath,
+            absolutePath = relativePath,
             sizeBytes = if (size > 0) size else dest.length(),
             mimeType = mime.ifBlank { "image/$ext" },
             content = ""      // 图片内容不入消息,只留路径
         ))
+        return
+    }
+
+    // Office/PDF 是二进制附件：保留应用私有副本并交给 document_extract / document_convert，
+    // 绝不能把它们当 UTF-8 文本直接读入消息，否则会出现乱码、超大上下文和无响应。
+    if (ext in setOf("pdf", "docx", "pptx", "xlsx", "xls", "odt", "odp")) {
+        val (dest, relativePath) = copyToWorkspace() ?: run { toast("无法读取文档: $fileName"); return }
+        addAttachment(Attachment(
+            fileName = fileName,
+            absolutePath = relativePath,
+            sizeBytes = if (size > 0) size else dest.length(),
+            mimeType = mime.ifBlank { "application/octet-stream" },
+            content = ""
+        ))
+        toast("文档已附带，AI 可用 document_extract 读取")
         return
     }
 
@@ -198,10 +212,10 @@ private suspend fun processAttachmentUri(
 
     // 大文本走路径,不读进内存 —— 既不会 OOM,也不会顶爆上下文。
     if (size > INLINE_TEXT_LIMIT) {
-        val dest = copyToPrivate() ?: run { toast("读取失败: $fileName"); return }
+        val (dest, relativePath) = copyToWorkspace() ?: run { toast("读取失败: $fileName"); return }
         addAttachment(Attachment(
             fileName = fileName,
-            absolutePath = dest.absolutePath,
+            absolutePath = relativePath,
             sizeBytes = if (size > 0) size else dest.length(),
             mimeType = mime,
             content = ""
@@ -271,6 +285,7 @@ private fun HsuIcon(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun ChatScreen(
     chatState: ChatStateLike,
     conversationTitle: String = "新聊天",
@@ -278,6 +293,7 @@ fun ChatScreen(
     currentModel: String = "",
     supplierId: String = "",
     providerName: String = "",
+    workspaceRoot: String = "",
     availableModels: List<String> = emptyList(),
     onSwitchModel: (String) -> Unit = {},
     thinkingEnabled: Boolean = false,
@@ -333,7 +349,6 @@ fun ChatScreen(
         }
     }
     var unreadCount by remember(chatState) { mutableIntStateOf(0) }
-    var previousMessageCount by remember(chatState) { mutableIntStateOf(0) }
     val context = LocalContext.current
     val voiceState = voiceInputHelper?.state?.collectAsState()?.value ?: VoiceInputHelper.State.IDLE
     val voiceFinalText = voiceInputHelper?.finalText?.collectAsState()?.value.orEmpty()
@@ -395,7 +410,7 @@ fun ChatScreen(
         if (result == null) return@rememberLauncherForActivityResult
         scope.launch {
             result.forEach { uri ->
-                withContext(Dispatchers.IO) { processAttachmentUri(context, uri, pendingAttachments) }
+                withContext(Dispatchers.IO) { processAttachmentUri(context, uri, pendingAttachments, workspaceRoot) }
             }
         }
     }
@@ -404,7 +419,7 @@ fun ChatScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) scope.launch {
-            withContext(Dispatchers.IO) { processAttachmentUri(context, uri, pendingAttachments) }
+            withContext(Dispatchers.IO) { processAttachmentUri(context, uri, pendingAttachments, workspaceRoot) }
         }
     }
 
@@ -462,33 +477,84 @@ fun ChatScreen(
         derivedStateOf { chatState.messages.toList().groupByTurn() }
     }
 
-    // Follow new work only while the user is already reading at the tail.
-    LaunchedEffect(chatState.messages.size) {
-        val currentCount = chatState.messages.size
-        val added = (currentCount - previousMessageCount).coerceAtLeast(0)
-        if (added > 0) {
-            if (nearBottom) {
-                kotlinx.coroutines.yield()
-                val target = listState.layoutInfo.totalItemsCount - 1
-                if (target >= 0) listState.animateScrollToItem(target)
-            } else {
-                unreadCount += added
+    // Follow the tail for both newly-added messages and streaming content updates.
+    // Watching only messages.size misses token-by-token replacements of the last item,
+    // which was why a long answer could grow below the viewport without moving the list.
+    // Once the user scrolls away from the tail, auto-follow pauses and the unread counter
+    // keeps the manual jump-to-bottom action available.
+    LaunchedEffect(chatState) {
+        var initialized = false
+        var observedCount = 0
+        var previousContentRevision: Triple<Long, Int, Int>? = null
+        var lastScrollAtNanos = 0L
+
+        snapshotFlow {
+            val last = chatState.messages.lastOrNull()
+            Triple(
+                chatState.messages.size,
+                Triple(last?.id ?: -1L, last?.content?.length ?: 0, last?.reasoning?.length ?: 0),
+                chatState.isStreaming.value
+            )
+        }.collect { revision ->
+            val currentCount = revision.first
+            val contentRevision = revision.second
+
+            if (!initialized) {
+                initialized = true
+                observedCount = currentCount
+                previousContentRevision = contentRevision
+                if (currentCount > 0) {
+                    kotlinx.coroutines.yield()
+                    val target = listState.layoutInfo.totalItemsCount - 1
+                    if (target >= 0) listState.scrollToItem(target, scrollOffset = 1_000_000)
+                    lastScrollAtNanos = System.nanoTime()
+                }
+                return@collect
             }
+
+            val added = (currentCount - observedCount).coerceAtLeast(0)
+            val contentChanged = contentRevision != previousContentRevision
+            val atTail = nearBottom
+            if (added > 0 && !atTail) unreadCount += added
+
+            // New messages jump immediately. Streaming text is throttled to 80ms so the
+            // list follows smoothly without starting an animation for every token.
+            val now = System.nanoTime()
+            val shouldScroll = atTail && (added > 0 || contentChanged) &&
+                (added > 0 || now - lastScrollAtNanos >= 80_000_000L)
+            if (shouldScroll) {
+                kotlinx.coroutines.yield()
+                if (nearBottom) {
+                    val target = listState.layoutInfo.totalItemsCount - 1
+                    if (target >= 0) listState.scrollToItem(target, scrollOffset = 1_000_000)
+                    lastScrollAtNanos = now
+                }
+            }
+
+            observedCount = currentCount
+            previousContentRevision = contentRevision
         }
-        previousMessageCount = currentCount
     }
     LaunchedEffect(nearBottom) {
         if (nearBottom) unreadCount = 0
     }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
+    Column(
+        Modifier.fillMaxSize().background(Bg).imePadding().navigationBarsPadding()
+    ) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onOpenDrawer, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Outlined.ArrowBack, contentDescription = "返回会话列表", tint = Ink)
+                Icon(Icons.Outlined.Menu, contentDescription = "打开会话列表", tint = Ink)
             }
+            ProviderLogo(
+                supplierId = supplierId,
+                providerName = providerName.ifBlank { assistantName },
+                logoSize = 32.dp,
+                modifier = Modifier.padding(end = 8.dp)
+            )
             Column(
                 Modifier.weight(1f).padding(horizontal = 8.dp)
                     .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
@@ -498,15 +564,15 @@ fun ChatScreen(
             ) {
                 Text(
                     conversationTitle.ifBlank { "新聊天" },
-                    fontSize = 21.sp,
-                    lineHeight = 27.sp,
+                    fontSize = 18.sp,
+                    lineHeight = 24.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Ink,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    assistantSubtitle(assistantName, currentModel, providerName),
+                    "$modelDisplayName · ${if (chatState.isStreaming.value) "正在生成" else "已就绪"}",
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
                     color = Sub,
@@ -523,6 +589,11 @@ fun ChatScreen(
                         text = { Text("打开终端") },
                         leadingIcon = { Icon(Icons.Outlined.Terminal, contentDescription = null) },
                         onClick = { showHeaderMenu = false; onNavigateToTerminal() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("打开工作区") },
+                        leadingIcon = { Icon(Icons.Outlined.FolderOpen, contentDescription = null) },
+                        onClick = { showHeaderMenu = false; onNavigateToWorkspace() }
                     )
                     DropdownMenuItem(
                         text = { Text(if (subAgentActive) "进入指挥室 · 运行中" else "进入指挥室") },
@@ -560,11 +631,26 @@ fun ChatScreen(
             isRunning = chatState.isStreaming.value,
             onStop = onStopGoal
         )
-        WorkspaceQuickStrip(
-            linuxReady = WorkspaceRuntime.hasLinux(),
-            onOpenTerminal = onNavigateToTerminal,
-            onOpenWorkspace = onNavigateToWorkspace
-        )
+        if (chatState.isStreaming.value) {
+            WorkspaceQuickStrip(
+                linuxReady = WorkspaceRuntime.hasLinux(),
+                onOpenTerminal = onNavigateToTerminal,
+                onOpenWorkspace = onNavigateToWorkspace
+            )
+        }
+
+        val agentState = chatState as? AgentChatState
+        val confirmReq = agentState?.pendingConfirm?.value
+        // Keep a pending request from becoming a stale card when the mode is changed
+        // from Settings while this chat is waiting for approval. The mode change is
+        // persisted at application scope, so resolve the suspended AgentCore here.
+        LaunchedEffect(permissionMode, agentState) {
+            if (permissionMode == com.hsucode.security.PermissionMode.ALLOW_ALL &&
+                agentState?.pendingConfirm?.value != null
+            ) {
+                agentState.approveAlwaysConfirmation()
+            }
+        }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
@@ -577,7 +663,11 @@ fun ChatScreen(
                 item(key = "welcome_panel") {
                     WelcomePanel(
                         currentModel = modelDisplayName,
-                        onPrompt = { prompt -> chatState.input.value = prompt }
+                        providerName = providerName,
+                        hasWorkspace = workspaceRoot.isNotBlank(),
+                        onPrompt = { prompt -> chatState.input.value = prompt },
+                        onOpenSettings = onNavigateToSettings,
+                        onOpenWorkspace = onNavigateToWorkspace
                     )
                 }
             }
@@ -616,13 +706,12 @@ fun ChatScreen(
                         AgentTurnBlock(
                             group,
                             isStreaming = chatState.isStreaming.value,
-                            onRegenerate = group.assistantMessage?.let { a -> { onRegenerate(a.id) } }
+                            onRegenerate = group.assistantMessage?.let { a -> { onRegenerate(a.id) } },
+                            onOpenWorkspace = onNavigateToWorkspace,
                         )
                 }
             }
             // Confirmation card (rendered in chat flow)
-            val agentState = chatState as? AgentChatState
-            val confirmReq = agentState?.pendingConfirm?.value
             if (confirmReq != null) {
                 item(key = "confirm_card") {
                     ConfirmCard(
@@ -630,7 +719,13 @@ fun ChatScreen(
                         isIrreversible = confirmReq.isIrreversible,
                         onDeny = { agentState.denyConfirmation() },
                         onAllowOnce = { agentState.approveOnceConfirmation() },
-                        onAlwaysAllow = { agentState.approveAlwaysConfirmation() }
+                        onAlwaysAllow = {
+                            // "总是允许" must survive an AgentCore/session rebuild.
+                            // The former in-memory whitelist only covered one core and
+                            // made the same approval card return after navigation.
+                            onUpdatePermissionMode(com.hsucode.security.PermissionMode.ALLOW_ALL)
+                            agentState.approveAlwaysConfirmation()
+                        }
                     )
                 }
             }
@@ -694,39 +789,65 @@ fun ChatScreen(
             )
         }
 
-        // ---- 「+」卡片:上排 图片/文件/文件夹,下排 skill/MCP/联网搜索/深度分析 ----
+        // Advanced capabilities stay out of the composer until they are needed.
         if (showPlusCard) {
-            Column(
-                Modifier.widthIn(max = 840.dp).fillMaxWidth().align(Alignment.CenterHorizontally)
-                    .padding(horizontal = 12.dp).padding(bottom = 8.dp)
-                    .background(Bg, RoundedCornerShape(8.dp))
-                    .border(1.dp, Border, RoundedCornerShape(8.dp))
-                    .padding(12.dp)
+            ModalBottomSheet(
+                onDismissRequest = { showPlusCard = false },
+                containerColor = Bg,
+                contentColor = Ink,
             ) {
-                // 上排:图片 / 文件 / 文件夹
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    PlusAction(Icons.Outlined.Image, "图片", Ink, Sub) { showPlusCard = false; imageLauncher.launch("image/*") }
-                    PlusAction(Icons.Outlined.Description, "文件", Ink, Sub) { showPlusCard = false; attachLauncher.launch(arrayOf("*/*")) }
-                    PlusAction(Icons.Outlined.Folder, "文件夹", Ink, Sub) { showPlusCard = false; showFolderPicker = true }
-                }
-                Box(Modifier.fillMaxWidth().padding(vertical = 8.dp).height(0.5.dp).background(Border))
-                // 下排:skill / MCP / 联网搜索 / 深度分析
-                PlusRow(Icons.Outlined.Bolt, "Skill", "选择技能,在输入框生成 /技能名", Ink, Sub, null) { showPlusCard = false; showSkillPicker = true }
-                PlusRow(Icons.Outlined.Extension, "MCP", "选择 MCP 服务器,生成 @服务器 引用", Ink, Sub, null) { showPlusCard = false; showMcpPicker = true }
-                PlusRow(Icons.Outlined.FolderOpen, "工作区", "打开免 Root 工作区与 Ubuntu 配置", Ink, Sub, null) {
-                    showPlusCard = false; onNavigateToWorkspace()
-                }
-                PlusRow(Icons.Outlined.Public, "联网搜索", if (webSearchOn) "已开启" else "已关闭(不打开就不能联网获取信息)", Ink, Sub, webSearchOn) {
-                    webSearchOn = !webSearchOn; onSetWebSearchEnabled(webSearchOn)
-                }
-                PlusRow(Icons.Outlined.Psychology, "深度分析", if (thinkingEnabled) "已开启(深度思考)" else "已关闭", Ink, Sub, thinkingEnabled) {
-                    val next = !thinkingEnabled; onThinkingEnabledChange(next); if (next) onThinkingLevelChange(4)
+                Column(
+                    Modifier.widthIn(max = 840.dp).fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 8.dp)
+                        .padding(bottom = 24.dp)
+                ) {
+                    Text("添加内容与能力", style = MaterialTheme.typography.titleMedium, color = Ink)
+                    Text("附件优先，工具能力按需开启。", style = MaterialTheme.typography.bodySmall, color = Sub)
+                    Spacer(Modifier.height(12.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        PlusAction(Icons.Outlined.Image, "图片", Ink, Sub) { showPlusCard = false; imageLauncher.launch("image/*") }
+                        PlusAction(Icons.Outlined.Description, "文件", Ink, Sub) { showPlusCard = false; attachLauncher.launch(arrayOf("*/*")) }
+                        PlusAction(Icons.Outlined.Folder, "文件夹", Ink, Sub) { showPlusCard = false; showFolderPicker = true }
+                    }
+                    HorizontalDivider(color = Border, modifier = Modifier.padding(vertical = 8.dp))
+                    PlusRow(Icons.Outlined.AutoAwesome, "优化任务", "用 AI 补全当前描述", Ink, Sub, expandingPrompt) {
+                        val draft = chatState.input.value
+                        if (!expandingPrompt && draft.isNotBlank()) {
+                            expandingPrompt = true
+                            scope.launch {
+                                val a = context.applicationContext as HsucodeApplication
+                                val r = PromptExpander.expand(a.database, a.keystore, PromptExpander.Kind.TASK, draft)
+                                r.onSuccess { chatState.input.value = it }
+                                r.onFailure { Toast.makeText(context, "扩展失败:${it.message}", Toast.LENGTH_SHORT).show() }
+                                expandingPrompt = false
+                                showPlusCard = false
+                            }
+                        }
+                    }
+                    PlusRow(Icons.Outlined.MicNone, "语音输入", if (voiceState == VoiceInputHelper.State.LISTENING) "正在听取…" else "把语音转成消息", Ink, Sub, voiceState == VoiceInputHelper.State.LISTENING) {
+                        if (voiceState == VoiceInputHelper.State.LISTENING) voiceInputHelper?.stopListening()
+                        else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) voiceInputHelper?.startListening()
+                        else micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        showPlusCard = false
+                    }
+                    HorizontalDivider(color = Border, modifier = Modifier.padding(vertical = 8.dp))
+                    PlusRow(Icons.Outlined.Bolt, "Skill", "选择要在本次对话使用的技能", Ink, Sub, null) { showPlusCard = false; showSkillPicker = true }
+                    PlusRow(Icons.Outlined.Extension, "MCP", "选择外部工具服务器", Ink, Sub, null) { showPlusCard = false; showMcpPicker = true }
+                    PlusRow(Icons.Outlined.FolderOpen, "工作区", "打开文件与 Linux 环境", Ink, Sub, null) {
+                        showPlusCard = false; onNavigateToWorkspace()
+                    }
+                    PlusRow(Icons.Outlined.Public, "联网搜索", if (webSearchOn) "已开启" else "已关闭", Ink, Sub, webSearchOn) {
+                        webSearchOn = !webSearchOn; onSetWebSearchEnabled(webSearchOn)
+                    }
+                    PlusRow(Icons.Outlined.Psychology, "深度分析", if (thinkingEnabled) "已开启" else "已关闭", Ink, Sub, thinkingEnabled) {
+                        val next = !thinkingEnabled; onThinkingEnabledChange(next); if (next) onThinkingLevelChange(4)
+                    }
                 }
             }
         }
         if (showFolderPicker) {
             DirectoryPickerDialog(
-                initialPath = "",
+                initialPath = workspaceRoot,
                 onConfirm = { path -> onSetConversationWorkspace(path); showFolderPicker = false },
                 onDismiss = { showFolderPicker = false }
             )
@@ -768,6 +889,8 @@ fun ChatScreen(
                             val isImg = att.mimeType.startsWith("image/")
                             if (isImg) {
                                 append("\n### ${att.fileName}(图片,路径:${att.absolutePath})\n")
+                            } else if (att.fileName.substringAfterLast('.', "").lowercase() in setOf("pdf", "docx", "pptx", "xlsx", "xls", "odt", "odp")) {
+                                append("\n### ${att.fileName}(文档,路径:${att.absolutePath},请使用 document_extract 或 document_convert 处理)\n")
                             } else {
                                 append("\n### ${att.fileName}(文件较大未内联,路径:${att.absolutePath},请用 file_read 按需读取)\n")
                             }
@@ -790,8 +913,8 @@ fun ChatScreen(
                 .align(Alignment.CenterHorizontally)
                 .padding(horizontal = 12.dp)
                 .padding(bottom = 12.dp)
-                .border(1.dp, Border, RoundedCornerShape(18.dp))
-                .background(xc.bgElevated, RoundedCornerShape(18.dp))
+                .border(1.dp, Border, RoundedCornerShape(8.dp))
+                .background(xc.bgElevated, RoundedCornerShape(8.dp))
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
                 // Row 1: text field
@@ -873,7 +996,7 @@ fun ChatScreen(
                                     .padding(horizontal = 10.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                val isImage = att.absolutePath.isNotEmpty()
+                                val isImage = att.mimeType.startsWith("image/")
                                 Icon(
                                     if (isImage) Icons.Outlined.Image else Icons.Outlined.Description,
                                     contentDescription = null,
@@ -920,18 +1043,12 @@ fun ChatScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // RikkaHub 风格的下层工具栏:供应商头像、模式和轻量动作集中在这里;
-                    // 上下文与发送已经放到输入框右侧,避免底部操作重复和横向拥挤。
+                    // The composer keeps the recurring controls only. Provider and model
+                    // identity remain in the header rather than repeating at the bottom.
                     Row(
                         modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        ProviderLogo(
-                            supplierId = supplierId,
-                            providerName = providerName.ifBlank { assistantName },
-                            logoSize = 48.dp
-                        )
-                        Spacer(Modifier.width(6.dp))
                         HsuIcon(
                             icon = Icons.Outlined.Add,
                             size = 19.dp,
@@ -940,71 +1057,34 @@ fun ChatScreen(
                             onClick = { showPlusCard = !showPlusCard }
                         )
                         val isFull = permissionMode == com.hsucode.security.PermissionMode.ALLOW_ALL
-                        val accessSuffix = if (isFull) " · 完全访问" else " · 正常"
+                        val autoApproveRisk = permissionMode == com.hsucode.security.PermissionMode.AUTO_APPROVE_RISK
+                        val accessSuffix = when {
+                            isFull -> " · 完全访问"
+                            autoApproveRisk -> " · 自动批准"
+                            else -> " · 请求批准"
+                        }
                         val modeLabel = when {
                             collabMode -> "协作$accessSuffix"
                             permissionMode == com.hsucode.security.PermissionMode.PLAN -> "计划"
                             isFull -> "完全访问"
+                            autoApproveRisk -> "帮我批准"
                             else -> "聊天"
                         }
                         Text(
                             modeLabel,
                             fontSize = 12.sp,
-                            color = if (isFull) xc.red else if (collabMode || permissionMode == com.hsucode.security.PermissionMode.PLAN) xc.green else Sub,
+                            color = if (isFull) xc.red else if (collabMode || permissionMode == com.hsucode.security.PermissionMode.PLAN || autoApproveRisk) xc.green else Sub,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { showModeCard = !showModeCard }
-                                .padding(horizontal = 4.dp, vertical = 14.dp)
-                        )
-                        HsuIcon(
-                            icon = Icons.Outlined.AutoAwesome,
-                            size = 19.dp,
-                            tint = if (expandingPrompt || chatState.input.value.isBlank()) xc.faint else xc.green,
-                            contentDescription = "优化任务描述",
-                            onClick = {
-                                val draft = chatState.input.value
-                                if (!expandingPrompt && draft.isNotBlank()) {
-                                    expandingPrompt = true
-                                    scope.launch {
-                                        val a = context.applicationContext as HsucodeApplication
-                                        val r = PromptExpander.expand(a.database, a.keystore, PromptExpander.Kind.TASK, draft)
-                                        r.onSuccess { chatState.input.value = it }
-                                        r.onFailure { Toast.makeText(context, "扩展失败:${it.message}", Toast.LENGTH_SHORT).show() }
-                                        expandingPrompt = false
-                                    }
-                                }
-                            }
-                        )
-                        HsuIcon(
-                            icon = Icons.Outlined.MicNone,
-                            size = 19.dp,
-                            tint = if (voiceState == VoiceInputHelper.State.LISTENING) xc.red else xc.sub,
-                            contentDescription = if (voiceState == VoiceInputHelper.State.LISTENING) "停止语音输入" else "语音输入",
-                            onClick = {
-                                if (voiceState == VoiceInputHelper.State.LISTENING) {
-                                    voiceInputHelper?.stopListening()
-                                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                                    voiceInputHelper?.startListening()
-                                } else {
-                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                }
-                            }
-                        )
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            "$modelDisplayName · $effortLabel",
-                            fontSize = 12.sp,
-                            color = Sub,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
-                                    showMainMenu = !showMainMenu
-                                    showEffortMenu = false
-                                }
                                 .padding(horizontal = 8.dp, vertical = 14.dp)
                         )
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = { showMainMenu = !showMainMenu; showEffortMenu = false },
+                            modifier = Modifier.height(48.dp)
+                        ) { Text("模型", style = MaterialTheme.typography.labelLarge) }
                     }
                 }
             }
@@ -1023,6 +1103,13 @@ fun ChatScreen(
                     onPick = { mode, collab ->
                         onSetCollabMode(collab)
                         onUpdatePermissionMode(mode)
+                        // The confirmation card's "总是允许" and the full-access
+                        // selector use the same persisted mode. Resolve a currently
+                        // waiting approval as well, so the current task does not keep
+                        // showing a stale approval button.
+                        if (mode == com.hsucode.security.PermissionMode.ALLOW_ALL) {
+                            (chatState as? AgentChatState)?.approveAlwaysConfirmation()
+                        }
                         showModeCard = false
                     }
                 )
@@ -1460,7 +1547,7 @@ private fun ExpandableStatsBar(stats: TokenStats, model: String, chatState: Chat
                     val cat = when {
                         name in listOf("web_search", "web_fetch", "web_search_batch") -> "网络"
                         name in listOf("file_read", "file_write", "file_edit", "edit", "multi_edit", "list_dir", "grep", "glob") -> "文件"
-                        name in listOf("shell_exec", "su_exec", "code_exec", "env_exec") -> "终端"
+                        name in listOf("shell_exec", "su_exec", "code_exec", "env_exec", "shizuku_exec") -> "终端"
                         name in listOf("invoke_skill", "skill_manage") -> "技能"
                         name in listOf("dispatch_agents", "wolfpack_run") -> "子智能体"
                         name == "agent_plan" -> "计划"
@@ -1626,7 +1713,7 @@ private fun ContextStatsCard(usage: ContextUsage, stats: TokenStats, model: Stri
             val cat = when {
                 name in listOf("web_search", "web_fetch", "web_search_batch") -> "网络"
                 name in listOf("file_read", "file_write", "file_edit", "edit", "multi_edit", "list_dir", "grep", "glob") -> "文件"
-                name in listOf("shell_exec", "su_exec", "code_exec", "env_exec") -> "终端"
+                name in listOf("shell_exec", "su_exec", "code_exec", "env_exec", "shizuku_exec") -> "终端"
                 name in listOf("invoke_skill", "skill_manage") -> "技能"
                 name in listOf("dispatch_agents", "wolfpack_run") -> "子智能体"
                 name == "agent_plan" -> "计划"
@@ -1718,10 +1805,7 @@ private fun ContextStatsCard(usage: ContextUsage, stats: TokenStats, model: Stri
     }
 }
 
-/**
- * 模式卡片:普通聊天 / 计划模式 / 协作模式;计划与协作各可选「正常 / 完全访问」。
- * 正常 = 危险操作会逐一确认;完全访问 = 全放行不再确认。协作 = 主脑+子智能体优先并行。
- */
+/** Permission controls for the chat composer, matching the three approval levels. */
 @Composable
 private fun ModeCard(
     permissionMode: com.hsucode.security.PermissionMode,
@@ -1730,47 +1814,72 @@ private fun ModeCard(
 ) {
     val xc = LocalHsuColors.current
     val ask = com.hsucode.security.PermissionMode.ASK
+    val autoApproveRisk = com.hsucode.security.PermissionMode.AUTO_APPROVE_RISK
     val plan = com.hsucode.security.PermissionMode.PLAN
     val allowAll = com.hsucode.security.PermissionMode.ALLOW_ALL
-    val isFull = permissionMode == allowAll
     Column(
         Modifier.widthIn(min = 280.dp, max = 320.dp)
             .background(xc.bgElevated, RoundedCornerShape(8.dp))
             .border(1.dp, xc.border, RoundedCornerShape(8.dp))
             .padding(16.dp)
     ) {
-        Text("模式", fontSize = 11.sp, fontFamily = JetBrainsMono, color = xc.sub)
+        Text("权限控制", fontSize = 11.sp, fontFamily = JetBrainsMono, color = xc.sub)
         Spacer(Modifier.height(8.dp))
+        PermissionAccessRow(
+            title = "请求批准",
+            subtitle = "编辑文件、执行命令或联网前请求确认",
+            active = !collabMode && permissionMode == ask,
+            color = xc.sub,
+        ) { onPick(ask, false) }
+        Spacer(Modifier.height(6.dp))
+        PermissionAccessRow(
+            title = "帮我批准",
+            subtitle = "普通操作自动执行，仅检测到风险时询问",
+            active = !collabMode && permissionMode == autoApproveRisk,
+            color = xc.green,
+        ) { onPick(autoApproveRisk, false) }
+        Spacer(Modifier.height(6.dp))
+        PermissionAccessRow(
+            title = "完全访问权限",
+            subtitle = "自动访问文件和网络；致命破坏操作仍会拦截",
+            active = !collabMode && permissionMode == allowAll,
+            color = xc.red,
+        ) { onPick(allowAll, false) }
 
-        // 普通聊天(也可选完全访问)
-        Text("聊天", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = xc.ink)
-        Text("正常对话", fontSize = 12.sp, color = xc.sub)
+        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp).height(0.5.dp).background(xc.border))
+        Text("工作模式", fontSize = 11.sp, fontFamily = JetBrainsMono, color = xc.sub)
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AccessChip("正常", !collabMode && permissionMode == ask, xc.green, xc) { onPick(ask, false) }
-            AccessChip("完全访问", !collabMode && permissionMode == allowAll, xc.red, xc) { onPick(allowAll, false) }
+            AccessChip("计划", !collabMode && permissionMode == plan, xc.green, xc) { onPick(plan, false) }
+            AccessChip("协作", collabMode, xc.green, xc) {
+                onPick(if (permissionMode == plan) ask else permissionMode, true)
+            }
         }
+    }
+}
 
-        Box(Modifier.fillMaxWidth().padding(vertical = 8.dp).height(0.5.dp).background(xc.border))
-
-        // 计划模式(只读规划)
-        Text("计划", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = xc.ink)
-        Text("只读探索和任务规划", fontSize = 12.sp, color = xc.sub)
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AccessChip("正常", !collabMode && permissionMode == plan, xc.green, xc) { onPick(plan, false) }
+@Composable
+private fun PermissionAccessRow(
+    title: String,
+    subtitle: String,
+    active: Boolean,
+    color: Color,
+    onClick: () -> Unit,
+) {
+    val xc = LocalHsuColors.current
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (active) color.copy(alpha = 0.13f) else xc.bg)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = if (active) color else xc.ink)
+            Text(subtitle, fontSize = 11.sp, color = xc.sub)
         }
-
-        Box(Modifier.fillMaxWidth().padding(vertical = 8.dp).height(0.5.dp).background(xc.border))
-
-        // 协作模式(主脑+子智能体)
-        Text("协作", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = xc.ink)
-        Text("主智能体协调多个子智能体", fontSize = 12.sp, color = xc.sub)
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AccessChip("正常", collabMode && !isFull, xc.green, xc) { onPick(ask, true) }
-            AccessChip("完全访问", collabMode && isFull, xc.red, xc) { onPick(allowAll, true) }
-        }
+        if (active) Text("✓", fontSize = 18.sp, color = color)
     }
 }
 
@@ -1807,7 +1916,11 @@ private fun AccessChip(label: String, active: Boolean, activeColor: Color, xc: H
 @Composable
 private fun WelcomePanel(
     currentModel: String,
-    onPrompt: (String) -> Unit
+    providerName: String = "",
+    hasWorkspace: Boolean = false,
+    onPrompt: (String) -> Unit,
+    onOpenSettings: () -> Unit = {},
+    onOpenWorkspace: () -> Unit = {},
 ) {
     val colors = LocalHsuColors.current
     val prompts = listOf(
@@ -1824,13 +1937,26 @@ private fun WelcomePanel(
     ) {
         Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = colors.green, modifier = Modifier.size(30.dp))
         Spacer(Modifier.height(16.dp))
-        Text("你好，今天想做什么？", style = MaterialTheme.typography.titleLarge, color = colors.ink)
+        Text("今天想完成什么？", style = MaterialTheme.typography.titleLarge, color = colors.ink)
         Text(
-            currentModel.ifBlank { "尚未选择模型" },
+            when {
+                currentModel.isBlank() -> "还没有配置模型"
+                providerName.isBlank() -> currentModel
+                else -> "$providerName · $currentModel"
+            },
             style = MaterialTheme.typography.bodySmall,
             color = colors.sub,
             modifier = Modifier.padding(top = 6.dp)
         )
+        if (currentModel.isBlank()) {
+            OutlinedButton(onClick = onOpenSettings, modifier = Modifier.padding(top = 12.dp)) {
+                Text("配置模型")
+            }
+        } else if (!hasWorkspace) {
+            TextButton(onClick = onOpenWorkspace, modifier = Modifier.padding(top = 4.dp)) {
+                Text("配置工作区", color = colors.green)
+            }
+        }
         Spacer(Modifier.height(22.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             prompts.take(2).forEach { prompt ->
@@ -2025,7 +2151,6 @@ private fun MessageBubble(msg: ChatState.MessageUi, isStreamingMessage: Boolean 
         else -> Ink
     }
     val context = LocalContext.current
-    val view = androidx.compose.ui.platform.LocalView.current
     var showMenu by remember(msg.id) { mutableStateOf(false) }
 
     // Blinking cursor while this specific assistant is streaming
@@ -2039,15 +2164,6 @@ private fun MessageBubble(msg: ChatState.MessageUi, isStreamingMessage: Boolean 
     Column(
         Modifier
             .fillMaxWidth()
-            .combinedClickable(
-                indication = null,
-                interactionSource = remember { MutableInteractionSource() },
-                onClick = {},
-                onLongClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                    showMenu = true
-                }
-            )
             .padding(horizontal = 0.dp, vertical = 4.dp),
         // 用户消息靠右,AI/工具消息靠左。
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
@@ -2055,7 +2171,16 @@ private fun MessageBubble(msg: ChatState.MessageUi, isStreamingMessage: Boolean 
         // Reasoning section (message-level, inside bubble, collapsible)
         ReasoningFoldable(msg, isCurrentStreaming = isStreamingMessage)
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // Keep long-press actions off the body so Android can begin a partial text selection.
+        Row(
+            modifier = Modifier.combinedClickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() },
+                onClick = {},
+                onLongClick = { showMenu = true }
+            ),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 roleLabel,
                 fontSize = 10.sp,
@@ -2119,15 +2244,17 @@ private fun MessageBubble(msg: ChatState.MessageUi, isStreamingMessage: Boolean 
                 )
             }
         } else {
-            Text(
-                msg.content.ifEmpty {
-                    if (isTool) "(empty)" else ""
-                },
-                fontSize = if (isTool) 11.sp else 13.sp,
-                fontFamily = JetBrainsMono,
-                color = contentColor,
-                lineHeight = if (isTool) 16.sp else 20.sp
-            )
+            SelectionContainer {
+                Text(
+                    msg.content.ifEmpty {
+                        if (isTool) "(empty)" else ""
+                    },
+                    fontSize = if (isTool) 11.sp else 13.sp,
+                    fontFamily = if (isTool) JetBrainsMono else FontFamily.Default,
+                    color = contentColor,
+                    lineHeight = if (isTool) 16.sp else 20.sp
+                )
+            }
         }
         }   // 气泡 Box 结束
 
@@ -2193,7 +2320,7 @@ fun MessageActionsRow(
         if (content.isNotBlank()) {
             Text(
                 "复制",
-                fontSize = 10.sp, fontFamily = JetBrainsMono, color = xc.faint,
+                fontSize = 11.sp, fontFamily = FontFamily.Default, color = xc.sub,
                 modifier = Modifier
                     .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -2206,7 +2333,7 @@ fun MessageActionsRow(
         if (onRegenerate != null) {
             Text(
                 "重答",
-                fontSize = 10.sp, fontFamily = JetBrainsMono, color = xc.faint,
+                fontSize = 11.sp, fontFamily = FontFamily.Default, color = xc.sub,
                 modifier = Modifier
                     .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onRegenerate() }
                     .padding(horizontal = 6.dp, vertical = 4.dp)

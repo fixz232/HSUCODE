@@ -10,7 +10,7 @@ import java.io.File
 /**
  * Reads a file by path with optional line range.
  *
- * Path is resolved against workspace root: /storage/emulated/0/HSUCODE
+ * Path is resolved against the active conversation workspace.
  * Relative paths (starting without /) are treated as relative to workspace root.
  * Absolute paths must be within the workspace subtree (no traversal escape).
  */
@@ -18,7 +18,7 @@ class FileReadTool : Tool {
 
     override val name = "file_read"
     override val description = "Read a file by path. Optionally specify startLine/endLine (1-based) for partial read. " +
-            "Paths are relative to /storage/emulated/0/HSUCODE unless absolute and within workspace."
+            "Paths are relative to the active conversation workspace unless absolute and within that workspace."
 
     override val parametersSchema: JSONObject = JSONObject().apply {
         put("type", "object")
@@ -56,27 +56,35 @@ class FileReadTool : Tool {
         try {
             val startLine = params["startLine"]?.toIntOrNull() ?: 1
             val endLine = params["endLine"]?.toIntOrNull()
-
-            val lines = file.readLines()
-            if (startLine > lines.size) {
-                return@withContext ToolResult.Error("起始行 $startLine 超出文件总行数 ${lines.size}")
+            if (startLine < 1) return@withContext ToolResult.Error("startLine 必须从 1 开始")
+            if (endLine != null && endLine < startLine) {
+                return@withContext ToolResult.Error("endLine 不能小于 startLine")
             }
 
-            val selected = if (endLine != null) {
-                val end = endLine.coerceAtMost(lines.size)
-                lines.drop(startLine - 1).take(end - startLine + 1)
-            } else {
-                lines.drop(startLine - 1)
+            // Do not materialize every line: generated logs can be hundreds of MB.
+            val output = StringBuilder()
+            var lineNumber = 0
+            var truncated = false
+            file.bufferedReader().use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    lineNumber++
+                    if (lineNumber < startLine) continue
+                    if (endLine != null && lineNumber > endLine) break
+                    val separator = if (output.isEmpty()) 0 else 1
+                    if (output.length + separator + line.length > MAX_OUTPUT) {
+                        truncated = true
+                        break
+                    }
+                    if (separator != 0) output.append('\n')
+                    output.append(line)
+                }
             }
-
-            val output = selected.joinToString("\n")
-            val truncated = if (output.length > MAX_OUTPUT) {
-                output.take(MAX_OUTPUT / 2) +
-                    "\n[...已截断 ${output.length - MAX_OUTPUT} 字符...]\n" +
-                    output.takeLast(MAX_OUTPUT / 2)
-            } else output
-
-            ToolResult.Success(truncated.ifEmpty { "(空行)" })
+            if (lineNumber < startLine) {
+                return@withContext ToolResult.Error("起始行 $startLine 超出文件总行数 $lineNumber")
+            }
+            if (truncated) output.append("\n[...输出已截断，请缩小行范围...]")
+            ToolResult.Success(output.toString().ifEmpty { "(空行)" })
         } catch (e: Exception) {
             ToolResult.Error("读取异常: ${e.message}")
         }

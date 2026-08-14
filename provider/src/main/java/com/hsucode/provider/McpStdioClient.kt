@@ -39,6 +39,7 @@ class McpStdioClient(
     private var stderrDrainer: Thread? = null
     private var nextId = 1
     private val lock = Any()
+    private val stderrLog = StringBuilder()
 
     private fun ensureProcess() {
         if (process != null) return
@@ -60,7 +61,14 @@ class McpStdioClient(
         stderrDrainer = Thread({
             runCatching {
                 // Drain continuously to prevent a full stderr pipe from blocking the server.
-                p.errorStream.bufferedReader().useLines { lines -> lines.forEach { _ -> } }
+                p.errorStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        synchronized(stderrLog) {
+                            stderrLog.appendLine(line)
+                            if (stderrLog.length > 4_000) stderrLog.delete(0, stderrLog.length - 4_000)
+                        }
+                    }
+                }
             }
         }, "mcp-stderr-drain").apply { isDaemon = true; start() }
         Log.i(TAG, "spawned MCP stdio server: ${full.joinToString(" ")}")
@@ -77,7 +85,7 @@ class McpStdioClient(
         w.write(payload.toString()); w.write("\n"); w.flush()
         var guard = 0
         while (guard++ < 10000) {
-            val line = r.readLine() ?: throw McpException("stdio MCP: server closed stream")
+            val line = r.readLine() ?: throw McpException("stdio MCP: server closed stream${recentStderrSuffix()}")
             val t = line.trim()
             if (t.isEmpty() || !t.startsWith("{")) continue
             val obj = try { JSONObject(t) } catch (_: Exception) { continue }
@@ -157,4 +165,9 @@ class McpStdioClient(
         reader = null
         stderrDrainer = null
     }
+
+    fun recentStderr(): String = synchronized(stderrLog) { stderrLog.toString() }
+
+    private fun recentStderrSuffix(): String = recentStderr().trim().takeIf { it.isNotBlank() }
+        ?.let { "\n最近 stderr:\n${it.takeLast(1200)}" }.orEmpty()
 }

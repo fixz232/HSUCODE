@@ -14,6 +14,13 @@ HSUCODE is a modified work based on the following upstream project:
 
 ## Modification Log
 
+### 2026-08-14 (UTC+08:00)
+
+- Reorganized the HSUCODE task workbench, conversation composer, sidebar, and settings information architecture. The resulting Compose UI is HSUCODE-specific work; it preserves attribution for any earlier adapted upstream code and assets listed in `THIRD-PARTY-NOTICES.md`.
+- Replaced the persistent chat capability panel with an on-demand bottom sheet, reduced repeated provider/model labels, and kept terminal, workspace, Skill, MCP, web-search, and reasoning entry points reachable through existing callbacks.
+- Added repository-level privacy, security, high-privilege capability, trademark non-affiliation, and external-service data-flow disclosures in `README.md`, `PRIVACY.md`, and `SECURITY.md`.
+- Prepared the signed `1.17` (versionCode 117) release build from this corresponding source tree. Signing keys remain local and are excluded from the repository.
+
 ### 2026-08-05 (UTC+08:00)
 
 - Simplified the settings surface with a compact common-actions strip, collapsible categories, section descriptions/counts, and search-driven expansion. Permission controls now live inside the security section instead of appearing as a detached block.

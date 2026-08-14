@@ -23,8 +23,8 @@ android {
         applicationId = "com.hsucode.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = 114          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
-        versionName = "1.14"
+        versionCode = 117          // 1.0 → 100;之后每次 +0.01 版本对应 +1(1.01→101…)
+        versionName = "1.17"
         ndk {
             abiFilters += setOf("arm64-v8a", "x86_64")
         }
@@ -111,6 +111,10 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.github.topjohnwu.libsu:core:5.2.2")
+    // Optional enhanced shell channel. It remains inert until the user installs,
+    // starts and explicitly authorizes Shizuku.
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     // execute_code 的 JS 解释器(CodeExecTool 依赖 org.mozilla.javascript.*)。缺失会导致
     // compileDebugKotlin 报 35 处 "Unresolved reference: mozilla" —— 别删。
     implementation("org.mozilla:rhino:1.7.14")

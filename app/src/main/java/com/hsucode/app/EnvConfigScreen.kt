@@ -46,8 +46,13 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
     val context = LocalContext.current
 
     val categories = remember { EnvCatalog.categories }
+    val savedProgress = EnvSetupProgressStore.state(context)
     // toolId -> 已安装 / 选中 / 安装状态;category.title -> 展开
-    val installed = remember { mutableStateMapOf<String, Boolean>() }
+    val installed = remember {
+        mutableStateMapOf<String, Boolean>().apply {
+            savedProgress.installedIds.forEach { put(it, true) }
+        }
+    }
     val selected = remember {
         mutableStateMapOf<String, Boolean>().apply {
             EnvCatalog.allTools.forEach { put(it.id, it.id in EnvCatalog.defaultToolIds) }
@@ -55,26 +60,67 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
     }
     val installState = remember { mutableStateMapOf<String, InstallState>() }
     val expanded = remember { mutableStateMapOf<String, Boolean>().apply { categories.forEach { put(it.title, true) } } }
-    var running by remember { mutableStateOf(false) }
-    var completedCount by remember { mutableIntStateOf(0) }
-    var totalCount by remember { mutableIntStateOf(0) }
-    var progressMessage by remember { mutableStateOf("") }
-    var failureDetail by remember { mutableStateOf("") }
+    var running by remember { mutableStateOf(savedProgress.running) }
+    var completedCount by remember { mutableIntStateOf(savedProgress.completedCount) }
+    var totalCount by remember { mutableIntStateOf(savedProgress.totalCount) }
+    var progressMessage by remember { mutableStateOf(savedProgress.message) }
+    var failureDetail by remember { mutableStateOf(savedProgress.detail) }
     // L1 修复:初始 false —— 未部署/未就绪时不显示"检测中…"(仅真正开始检测时才置 true)。
     var detecting by remember { mutableStateOf(false) }
     val prootState = ProotLinuxEnvironment.state
     val rootState = LinuxEnvironment.state
     val backend = WorkspaceRuntime.backend()
-    val linuxReady = backend != WorkspaceRuntime.Backend.ANDROID_SHELL
+    val linuxReady = backend in setOf(WorkspaceRuntime.Backend.PROOT_UBUNTU, WorkspaceRuntime.Backend.ROOT_CHROOT)
+
+    fun persistProgress() {
+        EnvSetupProgressStore.save(
+            context,
+            EnvSetupProgress(
+                running = running,
+                completedCount = completedCount,
+                totalCount = totalCount,
+                message = progressMessage,
+                detail = failureDetail,
+                installedIds = installed.filterValues { it }.keys
+            )
+        )
+    }
+
+    // A background installation may complete while this screen is not visible.
+    LaunchedEffect(savedProgress) {
+        running = savedProgress.running
+        completedCount = savedProgress.completedCount
+        totalCount = savedProgress.totalCount
+        progressMessage = savedProgress.message
+        failureDetail = savedProgress.detail
+        installed.clear()
+        savedProgress.installedIds.forEach { installed[it] = true }
+    }
 
     // 环境就绪后(或进入时已就绪)检测已安装状态。
     LaunchedEffect(backend, prootState, rootState) {
         if (linuxReady) {
             detecting = true
-            val probe = withContext(Dispatchers.IO) { EnvSetupManager.inspectInstalled(EnvCatalog.allTools) }
-            installed.clear()
-            installed.putAll(probe)
-            detecting = false
+            try {
+                // Do not probe while another installation is mutating the guest.
+                if (!running && !EnvSetupManager.isInstalling()) {
+                    val probe = withContext(Dispatchers.IO) { EnvSetupManager.inspectInstalled(EnvCatalog.allTools) }
+                    withContext(Dispatchers.Main) {
+                        if (probe.isNotEmpty()) {
+                            installed.clear()
+                            installed.putAll(probe)
+                            persistProgress()
+                        } else if (!running) {
+                            progressMessage = "无法读取 Ubuntu 中的工具状态，未执行安装。"
+                            failureDetail = EnvSetupManager.probeError()
+                                ?: "状态检测失败，请确认 Ubuntu 已就绪后重试。"
+                            persistProgress()
+                        }
+                    }
+                }
+            } finally {
+                detecting = false
+            }
         } else {
             installed.clear()
         }
@@ -86,13 +132,101 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
         cat.tools.forEach { selected[it.id] = newVal }
     }
 
-    fun deployProot() {
-        if (running || ProotLinuxEnvironment.state == ProotLinuxEnvironment.State.SETTING_UP) return
-        progressMessage = "正在部署 Ubuntu，完成后会自动检查环境。"
+    fun runInstall(todo: List<EnvTool>) {
+        if (EnvSetupManager.isInstalling()) {
+            progressMessage = "另一个环境配置任务仍在运行，请稍后再试。"
+            persistProgress()
+            return
+        }
+        if (todo.isEmpty()) {
+            progressMessage = "所选工具已经安装完成。"
+            failureDetail = ""
+            persistProgress()
+            return
+        }
+        if (!EnvSetupManager.beginInstall()) {
+            progressMessage = "环境配置任务未能启动，请稍后重试。"
+            persistProgress()
+            return
+        }
+        running = true
+        completedCount = 0
+        totalCount = todo.size
+        progressMessage = "正在更新 Ubuntu 软件源…"
         failureDetail = ""
+        persistProgress()
+        val appScope = (context.applicationContext as HsucodeApplication).applicationScope
+        appScope.launch(Dispatchers.IO) {
+            try {
+                val prepared = EnvSetupManager.preparePackageManager()
+                if (!prepared.ok) {
+                    withContext(Dispatchers.Main) {
+                        failureDetail = prepared.detail
+                        progressMessage = "软件源更新失败，未开始安装。请检查网络后重试。"
+                        persistProgress()
+                    }
+                    return@launch
+                }
+                for (t in todo) {
+                    withContext(Dispatchers.Main) {
+                        installState[t.id] = InstallState.INSTALLING
+                        progressMessage = "正在安装 ${t.name}（${completedCount + 1}/$totalCount）…"
+                        persistProgress()
+                    }
+                    val (ok, detail) = EnvSetupManager.install(t)
+                    // 安装后复检真实状态。
+                    val nowInstalled = EnvSetupManager.isInstalled(t)
+                    withContext(Dispatchers.Main) {
+                        // A successful installer is authoritative even if the follow-up probe is transiently unavailable.
+                        val completed = ok || nowInstalled == true
+                        installed[t.id] = completed
+                        installState[t.id] = if (completed) InstallState.OK else InstallState.FAIL
+                        completedCount++
+                        if (!completed) failureDetail = detail
+                        persistProgress()
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    val failed = todo.count { installState[it.id] == InstallState.FAIL }
+                    progressMessage = if (failed == 0) "所选工具已安装完成。" else "$failed 个工具未安装成功，可展开查看状态后重试。"
+                    persistProgress()
+                }
+            } finally {
+                EnvSetupManager.endInstall()
+                withContext(Dispatchers.Main) {
+                    running = false
+                    persistProgress()
+                }
+            }
+        }
+    }
+
+    fun deployProot(continueWith: List<EnvTool> = emptyList()) {
+        if (running || ProotLinuxEnvironment.state == ProotLinuxEnvironment.State.SETTING_UP) return
+        progressMessage = if (continueWith.isEmpty()) {
+            "正在部署 Ubuntu，完成后会自动检查环境。"
+        } else {
+            "正在部署 Ubuntu，完成后会继续安装所选工具。"
+        }
+        failureDetail = ""
+        persistProgress()
         val appCtx = context.applicationContext
         (appCtx as HsucodeApplication).applicationScope.launch(Dispatchers.IO) {
-            ProotLinuxEnvironment.bootstrap(force = ProotLinuxEnvironment.isReady())
+            val deployed = ProotLinuxEnvironment.bootstrap(force = ProotLinuxEnvironment.isReady())
+            withContext(Dispatchers.Main) {
+                if (!deployed) {
+                    failureDetail = ProotLinuxEnvironment.setupLog.trim().takeLast(600)
+                        .ifBlank { "Ubuntu 部署未完成，请查看工作区状态后重试。" }
+                    progressMessage = "Ubuntu 部署失败，未开始安装。"
+                    persistProgress()
+                } else if (continueWith.isNotEmpty()) {
+                    // Keep the user's first configuration request intact after the one-time Ubuntu bootstrap.
+                    runInstall(continueWith)
+                } else {
+                    progressMessage = "Ubuntu 已就绪，可开始配置所选工具。"
+                    persistProgress()
+                }
+            }
         }
     }
 
@@ -116,66 +250,17 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
 
     fun startInstall() {
         if (running) return
-        if (!linuxReady) {
-            progressMessage = "Ubuntu 尚未验证成功，正在启动部署。"
-            failureDetail = ""
-            deployProot()
-            return
-        }
-        if (EnvSetupManager.isInstalling()) {
-            progressMessage = "另一个环境配置任务仍在运行，请稍后再试。"
+        if (detecting) {
+            progressMessage = "正在检测已安装状态，请稍候。"
+            persistProgress()
             return
         }
         val todo = EnvCatalog.allTools.filter { selected[it.id] == true && installed[it.id] != true }
-        if (todo.isEmpty()) {
-            progressMessage = "所选工具已经安装完成。"
-            failureDetail = ""
+        if (!linuxReady) {
+            deployProot(todo)
             return
         }
-        if (!EnvSetupManager.beginInstall()) {
-            progressMessage = "环境配置任务未能启动，请稍后重试。"
-            return
-        }
-        running = true
-        completedCount = 0
-        totalCount = todo.size
-        progressMessage = "正在更新 Ubuntu 软件源…"
-        failureDetail = ""
-        val appScope = (context.applicationContext as HsucodeApplication).applicationScope
-        appScope.launch(Dispatchers.IO) {
-            try {
-                val prepared = EnvSetupManager.preparePackageManager()
-                if (!prepared.ok) {
-                    withContext(Dispatchers.Main) {
-                        failureDetail = prepared.detail
-                        progressMessage = "软件源更新失败，未开始安装。请检查网络后重试。"
-                    }
-                    return@launch
-                }
-                for (t in todo) {
-                    withContext(Dispatchers.Main) {
-                        installState[t.id] = InstallState.INSTALLING
-                        progressMessage = "正在安装 ${t.name}（${completedCount + 1}/$totalCount）…"
-                    }
-                    val (ok, detail) = EnvSetupManager.install(t)
-                    // 安装后复检真实状态。
-                    val nowInstalled = EnvSetupManager.isInstalled(t)
-                    withContext(Dispatchers.Main) {
-                        installed[t.id] = nowInstalled
-                        installState[t.id] = if (ok || nowInstalled) InstallState.OK else InstallState.FAIL
-                        completedCount++
-                        if (!ok && !nowInstalled) failureDetail = detail
-                    }
-                }
-                withContext(Dispatchers.Main) {
-                    val failed = todo.count { installState[it.id] == InstallState.FAIL }
-                    progressMessage = if (failed == 0) "所选工具已安装完成。" else "$failed 个工具未安装成功，可展开查看状态后重试。"
-                }
-            } finally {
-                EnvSetupManager.endInstall()
-                withContext(Dispatchers.Main) { running = false }
-            }
-        }
+        runInstall(todo)
     }
 
     Column(Modifier.fillMaxSize().background(xc.bg)) {
@@ -246,7 +331,7 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
                     .clickable(enabled = !running, indication = null, interactionSource = remember { MutableInteractionSource() }) { onBack() },
                 contentAlignment = Alignment.Center
             ) { Text("跳过", fontSize = 15.sp, fontFamily = Mono, color = xc.ink) }
-            val canStart = !running && ProotLinuxEnvironment.state != ProotLinuxEnvironment.State.SETTING_UP
+            val canStart = !running && !detecting && ProotLinuxEnvironment.state != ProotLinuxEnvironment.State.SETTING_UP
             Box(
                 Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(8.dp))
                     .background(if (canStart) xc.green else xc.green.copy(alpha = 0.5f))
@@ -256,6 +341,7 @@ fun EnvConfigScreen(onBack: () -> Unit, onOpenTerminal: () -> Unit = {}) {
                 Text(
                     when {
                         running -> "配置中…"
+                        detecting -> "检测中…"
                         !linuxReady -> "部署 Ubuntu"
                         else -> "开始配置"
                     },

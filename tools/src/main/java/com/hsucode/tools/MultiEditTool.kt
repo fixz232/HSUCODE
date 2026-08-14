@@ -60,7 +60,11 @@ class MultiEditTool : Tool {
         val file = File(safePath)
         if (!file.exists() || !file.isFile) return@withContext ToolResult.Error("文件不存在或不是普通文件: $path")
 
-        var working = file.readText()
+        var working = try {
+            SafeWorkspaceFiles.readEditableText(file)
+        } catch (e: IllegalArgumentException) {
+            return@withContext ToolResult.Error(e.message ?: "文件无法编辑")
+        }
         for (i in 0 until edits.length()) {
             val e = edits.optJSONObject(i) ?: return@withContext ToolResult.Error("edits[$i] 不是对象")
             val oldStr = e.optString("old_string", "")
@@ -78,8 +82,11 @@ class MultiEditTool : Tool {
         }
 
         return@withContext try {
-            file.writeText(working)
-            ToolResult.Success("已原子应用 ${edits.length()} 处编辑 → $path(现 ${working.length} 字符)")
+            SafeWorkspaceFiles.writeTextAtomically(file, working)
+            val published = WorkspaceContext.publishChatFile(file)
+            val destination = published?.let { "；已同步到手机 $it" }
+                ?: "；下载目录同步失败，工作区副本已保留"
+            ToolResult.Success("已原子应用 ${edits.length()} 处编辑 → $path(现 ${working.length} 字符)$destination")
         } catch (ex: Exception) {
             ToolResult.Error("写入失败: ${ex.message}")
         }

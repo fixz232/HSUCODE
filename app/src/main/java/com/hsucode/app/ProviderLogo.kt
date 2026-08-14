@@ -89,7 +89,10 @@ fun ProviderLogo(
         if (svg != null) {
             Canvas(Modifier.fillMaxSize()) {
                 drawIntoCanvas { canvas ->
-                    val inset = minOf(this.size.width, this.size.height) * 0.055f
+                    // Keep the catalog mark visually legible inside the fixed square.
+                    // Several provider SVGs already contain their own viewBox padding;
+                    // a large second inset made them look undersized in the chat UI.
+                    val inset = minOf(this.size.width, this.size.height) * 0.018f
                     val target = RectF(
                         inset,
                         inset,

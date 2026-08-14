@@ -90,11 +90,14 @@ class SecurityGateImpl(
     companion object {
         /** gap-13 只读内建工具:任何模式(DENY_ALL 除外)自动放行。 */
         val READ_ONLY_TOOLS = setOf(
-            "file_read", "list_dir", "grep", "glob",
+            "file_read", "list_dir", "grep", "glob", "document_extract",
             "web_search", "web_fetch", "invoke_skill"
         )
         /** gap-15 写/执行类工具:只读/计划模式一律拒绝。 */
-        val WRITE_TOOLS = setOf("file_write", "file_edit", "multi_edit", "su_exec")
+        val WRITE_TOOLS = setOf(
+            "file_write", "file_edit", "multi_edit", "document_create", "document_convert", "su_exec", "shizuku_exec",
+            "shizuku_file", "shizuku_system", "shizuku_ui", "shizuku_process_start", "shizuku_process_stop"
+        )
         /** gap-13 只读安全命令白名单(词边界匹配,无写重定向时自动放行)。 */
         val SAFE_COMMANDS = setOf(
             "ls", "cat", "pwd", "whoami", "id", "echo", "grep", "rg", "egrep", "fgrep",
@@ -111,11 +114,18 @@ class SecurityGateImpl(
         return when (toolName) {
             // gap-14:su_exec 也按命令风险决定可逆性(而非一律 IRREVERSIBLE),
             // 使 ALLOW_ALL 下普通 root 命令可自动放行、危险 root 命令强制确认。
-            "su_exec" -> classifyShellCommand(toolName, toolArgs).copy(capability = Capability.SYSTEM)
+            "su_exec", "shizuku_exec" -> classifyShellCommand(toolName, toolArgs).copy(capability = Capability.SYSTEM)
+            "shizuku_file" -> classifyShizukuFile(toolArgs)
+            "shizuku_system" -> classifyShizukuSystem(toolArgs)
+            "shizuku_ui" -> GateCommand(toolName, toolArgs, Capability.SCREEN, Reversibility.REVERSIBLE, "Shizuku 屏幕自动化")
+            "shizuku_process_start", "shizuku_process_stop" -> GateCommand(toolName, toolArgs, Capability.PROCESS, Reversibility.REVERSIBLE, "Shizuku 进程管理")
+            "shizuku_process_status" -> GateCommand(toolName, toolArgs, Capability.PROCESS, Reversibility.REVERSIBLE, "只读 Shizuku 进程状态")
             "shell_exec", "env_exec" -> classifyShellCommand(toolName, toolArgs)
             "file_read" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "只读文件操作，可逆")
             "file_write" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "文件写入可回滚")
             "file_edit", "multi_edit" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "文件局部编辑可回滚")
+            "document_extract" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "只读文档提取")
+            "document_create", "document_convert" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "文档导出或转换，可删除生成文件")
             "list_dir", "grep", "glob" -> GateCommand(toolName, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "只读文件/目录操作，可逆")
             "web_search", "web_fetch" -> GateCommand(toolName, toolArgs, Capability.NET, Reversibility.REVERSIBLE, "只读网络检索，不修改本地数据")
             "invoke_skill" -> GateCommand(toolName, toolArgs, Capability.UNKNOWN, Reversibility.REVERSIBLE, "只读取技能说明，不执行副作用")
@@ -229,8 +239,9 @@ class SecurityGateImpl(
 
         val isReadOnlyTool = cmd.toolName in READ_ONLY_TOOLS
         // gap-13:shell_exec 的只读安全命令(且无写重定向)视为安全。
-        val isSafeShell = cmd.toolName in setOf("shell_exec", "env_exec") && isSafeReadOnlyCommand(command)
-        val safe = isReadOnlyTool || isSafeShell
+        val isSafeShell = cmd.toolName in setOf("shell_exec", "env_exec", "shizuku_exec") && isSafeReadOnlyCommand(command)
+        val isSafeShizukuTool = isSafeShizukuAction(cmd)
+        val safe = isReadOnlyTool || isSafeShell || isSafeShizukuTool
 
         return when (mode) {
             PermissionMode.DENY_ALL ->
@@ -247,6 +258,17 @@ class SecurityGateImpl(
             PermissionMode.ASK -> {
                 if (safe) Decision.Allow("只读安全操作,自动放行")
                 else Decision.NeedConfirm("权限模式「询问」，需要确认", preview(cmd))
+            }
+
+            // "帮我批准" keeps the useful default fast path: normal file/network/tool
+            // actions continue without interruption, while commands classified as
+            // dangerous still remain visible to the user before they execute.
+            PermissionMode.AUTO_APPROVE_RISK -> {
+                if (risk == RiskLevel.DANGEROUS) {
+                    Decision.NeedConfirm("检测到风险操作，需要确认", preview(cmd))
+                } else {
+                    Decision.Allow("未检测到风险，自动批准")
+                }
             }
 
             // 允许全部(全自动):真·放行一切——只有 FATAL_BANNED(上面已拦)与显式 deny 规则能挡。
@@ -291,7 +313,7 @@ class SecurityGateImpl(
         sb.appendLine("工具: ${cmd.toolName}")
         sb.appendLine("参数: ${cmd.toolArgs}")
         when (cmd.toolName) {
-            "shell_exec", "su_exec", "env_exec" -> {
+            "shell_exec", "su_exec", "env_exec", "shizuku_exec" -> {
                 val cmdText = try { JSONObject(cmd.toolArgs).optString("command", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
                 sb.appendLine("命令: $cmdText")
                 if (cmd.toolName == "su_exec") {
@@ -304,6 +326,15 @@ class SecurityGateImpl(
                 val path = try { JSONObject(cmd.toolArgs).optString("path", "?") } catch (_: Exception) { "?" }
                 sb.appendLine("目标文件: $path")
                 sb.appendLine("⚠ 将覆写现有文件内容")
+            }
+            "shizuku_file", "shizuku_system", "shizuku_ui", "shizuku_process_start", "shizuku_process_stop" -> {
+                val args = runCatching { JSONObject(cmd.toolArgs) }.getOrNull()
+                sb.appendLine("动作: ${args?.optString("action").orEmpty().ifBlank { cmd.toolName }}")
+                args?.optString("path")?.takeIf { it.isNotBlank() }?.let { sb.appendLine("路径: $it") }
+                args?.optString("target")?.takeIf { it.isNotBlank() }?.let { sb.appendLine("目标: $it") }
+                args?.optString("package")?.takeIf { it.isNotBlank() }?.let { sb.appendLine("应用: $it") }
+                args?.optString("command")?.takeIf { it.isNotBlank() }?.let { sb.appendLine("命令: $it") }
+                sb.appendLine("⚠ 将通过 Shizuku 调试权限执行")
             }
         }
         return sb.toString()
@@ -364,10 +395,10 @@ class SecurityGateImpl(
     // ---- private helpers ----
 
     private fun extractCommand(cmd: GateCommand): String = when (cmd.toolName) {
-        "shell_exec", "su_exec", "env_exec" -> {
+        "shell_exec", "su_exec", "env_exec", "shizuku_exec", "shizuku_process_start" -> {
             try { JSONObject(cmd.toolArgs).optString("command", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
         }
-        "file_read", "file_write" -> {
+        "file_read", "file_write", "shizuku_file" -> {
             try { JSONObject(cmd.toolArgs).optString("path", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
         }
         else -> cmd.toolArgs
@@ -401,6 +432,57 @@ class SecurityGateImpl(
         val cap = inferCapability(command)
         val why = "风险等级: $risk, 命令: '$command'"
         return GateCommand(toolName, toolArgs, cap, rev, why)
+    }
+
+    private fun classifyShizukuFile(toolArgs: String): GateCommand {
+        val args = runCatching { JSONObject(toolArgs) }.getOrNull()
+        val action = args?.optString("action")?.lowercase().orEmpty()
+        val path = args?.optString("path").orEmpty()
+        val target = args?.optString("target").orEmpty()
+        val synthetic = when (action) {
+            "delete" -> "rm -rf $path"
+            "write" -> "printf data > $path"
+            "move" -> "mv $path $target"
+            "copy" -> "cp -R $path $target"
+            "mkdir" -> "mkdir -p $path"
+            "zip" -> "zip -r $target $path"
+            "unzip" -> "unzip $path -d $target"
+            else -> "cat $path"
+        }
+        return classifyShellCommand("shizuku_file", JSONObject().put("command", synthetic).toString())
+            .copy(capability = Capability.FS, why = "Shizuku 文件操作: $action $path")
+    }
+
+    private fun classifyShizukuSystem(toolArgs: String): GateCommand {
+        val args = runCatching { JSONObject(toolArgs) }.getOrNull()
+        val action = args?.optString("action")?.lowercase().orEmpty()
+        val synthetic = when (action) {
+            "install_apk" -> "pm install ${args?.optString("path").orEmpty()}"
+            "uninstall_app" -> "pm uninstall --user ${args?.optString("user_id", "0")} ${args?.optString("package").orEmpty()}"
+            "force_stop" -> "am force-stop ${args?.optString("package").orEmpty()}"
+            "launch_app" -> "monkey -p ${args?.optString("package").orEmpty()}"
+            "put_setting" -> "settings put ${args?.optString("namespace").orEmpty()} ${args?.optString("key").orEmpty()}"
+            "set_property" -> "setprop ${args?.optString("key").orEmpty()}"
+            "kill_process" -> "kill ${args?.optString("pid").orEmpty()}"
+            else -> "getprop"
+        }
+        return classifyShellCommand("shizuku_system", JSONObject().put("command", synthetic).toString())
+            .copy(capability = when (action) {
+                "install_apk", "uninstall_app", "launch_app", "force_stop" -> Capability.APP
+                "list_processes", "kill_process" -> Capability.PROCESS
+                else -> Capability.SYSTEM
+            }, why = "Shizuku 系统操作: $action")
+    }
+
+    private fun isSafeShizukuAction(cmd: GateCommand): Boolean {
+        val args = runCatching { JSONObject(cmd.toolArgs) }.getOrNull() ?: return false
+        val action = args.optString("action").lowercase()
+        return when (cmd.toolName) {
+            "shizuku_file" -> action in setOf("list", "read", "find", "info")
+            "shizuku_system" -> action in setOf("list_packages", "app_path", "get_setting", "get_property", "list_processes", "battery", "activities")
+            "shizuku_process_status" -> true
+            else -> false
+        }
     }
 
     private fun inferCapability(command: String): Capability = when {

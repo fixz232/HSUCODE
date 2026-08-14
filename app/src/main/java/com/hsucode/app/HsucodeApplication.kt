@@ -55,10 +55,24 @@ import androidx.compose.runtime.setValue
 
 class HsucodeApplication : Application() {
 
+    private companion object {
+        /** Per-conversation override selected from the chat '+' menu. */
+        const val SESSION_WORKSPACE_SETTING_PREFIX = "workspace_session_"
+    }
+
+    private fun sessionWorkspaceSettingKey(sessionId: Long): String =
+        "$SESSION_WORKSPACE_SETTING_PREFIX$sessionId"
+
+    private fun normalizeWorkspacePath(path: String): String =
+        path.trim().trimEnd('/', '\\')
+
     /** Process-lifetime scope for work that must survive individual Compose screens. */
     val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     lateinit var database: AppDatabase
+        private set
+    /** Shared durable journal for foreground, goal, cron and workspace tasks. */
+    lateinit var taskRuntime: TaskRuntimeManager
         private set
     lateinit var keystore: KeystoreProvider
         private set
@@ -146,6 +160,14 @@ class HsucodeApplication : Application() {
 
     /** Root chroot is an explicit opt-in; the default execution backend is rootless PRoot. */
     var rootModeEnabled by mutableStateOf(false)
+        private set
+
+    /** Shizuku is a separate, explicit system-shell channel; it never replaces PRoot. */
+    var shizukuEnabled by mutableStateOf(false)
+        private set
+
+    /** Explicit opt-in: use the Shizuku shell for the visible terminal and agent environment commands. */
+    var shizukuTerminalEnabled by mutableStateOf(false)
         private set
 
     /** Live plan card state — populated by `agent_plan` tool. Application-scoped so it
@@ -241,6 +263,9 @@ override fun onCreate() {
         // 抛在 Application.onCreate 里 = 进程当场死 = 用户看到的「点开就闪退」,
         // 而且全新安装一样崩,没有任何幸存路径。下面新增初始化时务必守住这个顺序。
         database = AppDatabase.getInstance(this)
+        taskRuntime = TaskRuntimeManager(database, applicationScope)
+        ShizukuManager.initialize(this)
+        AutomationTaskRunner.initialize(this)
         keystore = KeystoreProvider()
         runBlocking {
             runCatching { BackupManager.applyRestoredSecrets(this@HsucodeApplication, database, keystore) }
@@ -323,6 +348,8 @@ override fun onCreate() {
         LinuxEnvironment.init(this)
         // 默认工作区目录会挂载到 PRoot Ubuntu 的 /workspace；未安装 Ubuntu 时仍可跑 Android Shell。
         UserWorkspaceShell.init(this)
+        // Chat deliverables are also published to public Download/HSUCODE/date via MediaStore.
+        com.hsucode.tools.WorkspaceContext.configureChatOutput(this)
         // 所有会话、后台任务和文件工具共享同一应用私有默认根，避免 rootless 设备回落到
         // Android 11+ 无法稳定写入的共享存储路径。
         UserWorkspaceShell.directory()?.absolutePath?.let {
@@ -361,6 +388,13 @@ override fun onCreate() {
         toolRegistry.register(shellExecTool)
 val suExecTool = SuExecTool().also { this.suExecTool = it }
         toolRegistry.register(suExecTool)
+        toolRegistry.register(ShizukuExecTool { shizukuEnabled })
+        toolRegistry.register(ShizukuFileTool { shizukuEnabled })
+        toolRegistry.register(ShizukuSystemTool { shizukuEnabled })
+        toolRegistry.register(ShizukuUiTool { shizukuEnabled })
+        toolRegistry.register(ShizukuProcessStartTool { shizukuEnabled })
+        toolRegistry.register(ShizukuProcessStatusTool { shizukuEnabled })
+        toolRegistry.register(ShizukuProcessStopTool { shizukuEnabled })
         toolRegistry.register(FileReadTool())
         toolRegistry.register(FileWriteTool())
         toolRegistry.register(ListDirTool())
@@ -374,6 +408,8 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         toolRegistry.register(DeleteFileTool())
         toolRegistry.register(MakeDirectoryTool())
         toolRegistry.register(DocumentCreateTool())
+        toolRegistry.register(DocumentExtractTool())
+        toolRegistry.register(DocumentConvertTool())
         // 下载与抓网页分开:web_fetch 抽正文【进】上下文,download_file 存字节【不进】上下文。
         // 二进制走 web_fetch 既没意义又顶爆上下文。
         toolRegistry.register(DownloadFileTool())
@@ -564,6 +600,9 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         enterToSend = runBlocking { database.settingDao().get("enter_to_send")?.toBooleanStrictOrNull() ?: true }
         rootModeEnabled = runBlocking { database.settingDao().get("root_mode_enabled")?.toBooleanStrictOrNull() ?: false }
         WorkspaceRuntime.setRootModeEnabled(rootModeEnabled)
+        shizukuEnabled = runBlocking { database.settingDao().get("shizuku_enabled")?.toBooleanStrictOrNull() ?: false }
+        shizukuTerminalEnabled = runBlocking { database.settingDao().get("shizuku_terminal_enabled")?.toBooleanStrictOrNull() ?: false }
+        WorkspaceRuntime.setShizukuTerminalEnabled(shizukuTerminalEnabled)
         // 联网搜索总开关:默认【关闭】,不打开就不能联网获取信息。加载持久化值。
         com.hsucode.tools.WebSearchGate.enabled = runBlocking { database.settingDao().get("web_search_enabled")?.toBooleanStrictOrNull() ?: false }
         // Ensure enabledModelIds has at least the active model
@@ -706,6 +745,12 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         core.updateLimits(currentPowerMode.maxIterations, currentPowerMode.totalTimeoutMs)
         val chat = AgentChatState(database, core, openAiClient, compactClient)
         chat.currentSessionId = sessionId
+        // Give a newly-created session the current configured root immediately. The
+        // database-backed project/session override is applied asynchronously afterwards,
+        // but the first chat turn must never race back to the legacy root.
+        chat.sessionWorkspaceRoot = workspaceRootGlobal
+            .takeIf { it.isNotBlank() }
+            ?: com.hsucode.tools.WorkspaceContext.defaultRoot
         chat.thinkingEnabled = thinkingEnabled
         chat.thinkingLevel = thinkingLevel
         core.setConfirmHandler(chat.confirmHandler)
@@ -944,6 +989,7 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
             sessionId = sessionId,
             chat = chat,
             database = database,
+            taskRuntime = taskRuntime,
             judgeFactory = { buildGoalJudge() },
             appScope = applicationScope,
             onStatus = { sid, text -> goalRunStatus[sid] = text },
@@ -1110,10 +1156,18 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
     var workspaceRootGlobal by mutableStateOf("")
         private set
     fun updateWorkspaceRoot(path: String) {
-        val p = path.trim()
+        val p = normalizeWorkspacePath(path)
         workspaceRootGlobal = p
+        // Apply immediately so a message sent right after closing the picker uses the
+        // new root; persistence and project/session recalculation continue off the UI thread.
+        _active?.chat?.sessionWorkspaceRoot = p.ifBlank { com.hsucode.tools.WorkspaceContext.defaultRoot }
+        com.hsucode.tools.WorkspaceContext.workspaceRoot = p
         applicationScope.launch(Dispatchers.IO) {
             database.settingDao().put("workspace_root", p)
+            // An explicit global change should supersede a previous chat-only override
+            // for the current conversation. The next chat picker selection can create a
+            // new per-session override again.
+            database.settingDao().put(sessionWorkspaceSettingKey(currentSessionId), "")
             applyWorkspaceForSession(currentSessionId)
         }
     }
@@ -1142,15 +1196,17 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
     /**
      * 依据会话所属项目,设置运行期 [com.hsucode.tools.WorkspaceContext]:
      *  - projectId → 记忆按项目隔离(recall/save/精编记忆)。
-     *  - workspaceRoot → 项目级工作区(空则用全局设置 workspace_root,再空则默认)。
+     *  - workspaceRoot → 会话选择的目录 > 项目级工作区 > 全局设置 workspace_root > 默认目录。
      */
     suspend fun applyWorkspaceForSession(sessionId: Long) {
         try {
             val session = database.sessionDao().getById(sessionId)
             val pid = session?.projectId ?: 0L
+            val sessionRoot = database.settingDao().get(sessionWorkspaceSettingKey(sessionId))
+                ?.takeIf { it.isNotBlank() }
             val projectRoot = if (pid > 0L) database.projectDao().getById(pid)?.workspaceRoot?.takeIf { it.isNotBlank() } else null
             val globalRoot = database.settingDao().get("workspace_root")?.takeIf { it.isNotBlank() }
-            val root = projectRoot ?: globalRoot ?: com.hsucode.tools.WorkspaceContext.defaultRoot
+            val root = sessionRoot ?: projectRoot ?: globalRoot ?: com.hsucode.tools.WorkspaceContext.defaultRoot
             // 全局兜底(设置显示/无 per-session 上下文的后台核用)。
             com.hsucode.tools.WorkspaceContext.projectId = pid
             com.hsucode.tools.WorkspaceContext.workspaceRoot = root
@@ -1238,9 +1294,14 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
 
     /** 把某文件夹设为【当前对话】的工作目录(输入框 + 卡片里选文件夹)。只影响当前会话。 */
     fun setConversationWorkspace(path: String) {
-        val p = path.trim().ifBlank { return }
-        _active?.chat?.let { it.sessionWorkspaceRoot = p.trimEnd('/') }
+        val p = normalizeWorkspacePath(path).ifBlank { return }
+        val sessionId = currentSessionId
+        _active?.chat?.let { it.sessionWorkspaceRoot = p }
+        // Keep non-tool UI (file browser/export screens) aligned with the foreground chat.
         com.hsucode.tools.WorkspaceContext.workspaceRoot = p
+        applicationScope.launch(Dispatchers.IO) {
+            database.settingDao().put(sessionWorkspaceSettingKey(sessionId), p)
+        }
     }
 
     /** User-initiated single-agent run from the agent center. */
@@ -1383,6 +1444,13 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         }
     }
 
+    /** Refresh rule changes made from the dedicated permission screen immediately. */
+    fun reloadPermissionRules() {
+        applicationScope.launch(Dispatchers.IO) {
+            runCatching { securityGate.setPermissionRules(database.permissionRuleDao().getAll()) }
+        }
+    }
+
     /** Delete a single message row + refresh the visible list. */
     fun deleteMessage(id: Long) {
         applicationScope.launch(Dispatchers.Main) { agentChatState.deleteMessage(id) }
@@ -1494,6 +1562,24 @@ val suExecTool = SuExecTool().also { this.suExecTool = it }
         WorkspaceRuntime.setRootModeEnabled(enabled)
         applicationScope.launch(Dispatchers.IO) {
             database.settingDao().put("root_mode_enabled", enabled.toString())
+        }
+    }
+
+    fun updateShizukuEnabled(enabled: Boolean) {
+        shizukuEnabled = enabled
+        toolRegistry.invalidateAvailability()
+        if (!enabled && shizukuTerminalEnabled) updateShizukuTerminalEnabled(false)
+        applicationScope.launch(Dispatchers.IO) {
+            database.settingDao().put("shizuku_enabled", enabled.toString())
+        }
+    }
+
+    fun updateShizukuTerminalEnabled(enabled: Boolean) {
+        shizukuTerminalEnabled = enabled
+        WorkspaceRuntime.setShizukuTerminalEnabled(enabled)
+        terminalState.close()
+        applicationScope.launch(Dispatchers.IO) {
+            database.settingDao().put("shizuku_terminal_enabled", enabled.toString())
         }
     }
 

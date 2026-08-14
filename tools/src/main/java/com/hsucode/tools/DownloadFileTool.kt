@@ -35,14 +35,14 @@ class DownloadFileTool : Tool {
         private const val BUFFER = 64 * 1024
     }
 
-    private val http = OkHttpClient.Builder()
+    private val http = NetworkUrlPolicy.secureClient(OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)
-        .build()
+    ).build()
 
     override val name = "download_file"
     override val description = "从 URL 下载文件保存到本地。适合图片、压缩包等二进制内容 —— " +
-            "文件内容不会进入对话上下文,只返回保存路径和大小。要读网页正文请用 web_fetch。"
+            "文件内容不会进入对话上下文,只返回保存路径和大小,并同步到手机 Download/HSUCODE/日期。要读网页正文请用 web_fetch。"
 
     override val parametersSchema: JSONObject = JSONObject().apply {
         put("type", "object")
@@ -79,10 +79,10 @@ class DownloadFileTool : Tool {
         SelfProtect.refuse(safePath)?.let { return@withContext ToolResult.Error(it) }
         val outFile = File(safePath)
         outFile.parentFile?.mkdirs()
+        val partialFile = SafeWorkspaceFiles.createPartial(outFile)
 
         try {
-            val req = Request.Builder().url(url).build()
-            http.newCall(req).execute().use { resp ->
+            NetworkUrlPolicy.executeGet(http, url).use { resp ->
                 if (!resp.isSuccessful) {
                     return@withContext ToolResult.Error("HTTP ${resp.code}: 下载失败 $url")
                 }
@@ -98,30 +98,36 @@ class DownloadFileTool : Tool {
                 val body = resp.body ?: return@withContext ToolResult.Error("响应没有内容")
                 var total = 0L
                 body.byteStream().use { input ->
-                    outFile.outputStream().use { output ->
+                    partialFile.outputStream().buffered().use { output ->
                         val buf = ByteArray(BUFFER)
                         while (true) {
                             val n = input.read(buf)
                             if (n < 0) break
                             total += n
                             if (total > MAX_BYTES) {
-                                // 半截文件留在磁盘上比没有更糟 —— 后续步骤会把它当成完整文件用
-                                output.close()
-                                outFile.delete()
                                 return@withContext ToolResult.Error(
-                                    "文件超过上限 ${MAX_BYTES / 1024 / 1024}MB,已中止并清除"
+                                    "文件超过上限 ${MAX_BYTES / 1024 / 1024}MB,已中止并清除临时文件"
                                 )
                             }
                             output.write(buf, 0, n)
                         }
                     }
                 }
+                SafeWorkspaceFiles.commit(partialFile, outFile)
+                val published = WorkspaceContext.publishChatFile(
+                    outFile,
+                    mimeType = body.contentType()?.toString()
+                )
                 Log.i(TAG, "downloaded $url -> $safePath ($total bytes)")
-                ToolResult.Success("已下载: $safePath(${formatSize(total)})")
+                val destination = published?.let { "；已同步到手机 $it" }
+                    ?: "；下载目录同步失败，工作区副本已保留"
+                ToolResult.Success("已下载: $safePath(${formatSize(total)})$destination")
             }
         } catch (e: Exception) {
-            runCatching { if (outFile.exists()) outFile.delete() }
+            runCatching { if (partialFile.exists()) partialFile.delete() }
             ToolResult.Error("下载出错: ${e.message}")
+        } finally {
+            runCatching { if (partialFile.exists()) partialFile.delete() }
         }
     }
 

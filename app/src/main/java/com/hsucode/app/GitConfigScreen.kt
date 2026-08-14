@@ -144,7 +144,8 @@ fun GitConfigScreen(database: AppDatabase, keystore: KeystoreProvider, onBack: (
                 WorkspaceRuntime.runStreaming(cmd) { line ->
                     when (WorkspaceRuntime.backend()) {
                         WorkspaceRuntime.Backend.PROOT_UBUNTU -> ProotLinuxEnvironment.outputSink?.invoke(line)
-                        else -> LinuxEnvironment.outputSink?.invoke(line)
+                        WorkspaceRuntime.Backend.ROOT_CHROOT -> LinuxEnvironment.outputSink?.invoke(line)
+                        WorkspaceRuntime.Backend.SHIZUKU_SHELL, WorkspaceRuntime.Backend.ANDROID_SHELL -> Unit
                     }
                 }
             }

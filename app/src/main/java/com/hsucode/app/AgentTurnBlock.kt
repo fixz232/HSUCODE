@@ -4,7 +4,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AssignmentTurnedIn
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -18,7 +24,12 @@ import com.hsucode.app.R
 private val JetBrainsMono = FontFamily(Font(R.font.jetbrains_mono, androidx.compose.ui.text.font.FontWeight.Normal))
 
 @Composable
-fun AgentTurnBlock(group: TurnGroup, isStreaming: Boolean = false, onRegenerate: (() -> Unit)? = null) {
+fun AgentTurnBlock(
+    group: TurnGroup,
+    isStreaming: Boolean = false,
+    onRegenerate: (() -> Unit)? = null,
+    onOpenWorkspace: () -> Unit = {},
+) {
     val toolCount = group.toolMessages.size
     val hasReasoning = group.assistantMessage?.reasoning?.isNotEmpty() == true
     val xc = LocalHsuColors.current
@@ -43,6 +54,8 @@ fun AgentTurnBlock(group: TurnGroup, isStreaming: Boolean = false, onRegenerate:
     // ===== 原正常聚合渲染逻辑 =====
     // 用户要求:工具调用【默认收起】,想看时再点开(不再默认展开)。
     var expanded by remember(group.turnId) { mutableStateOf(false) }  // 默认收起
+    var resultExpanded by remember(group.key) { mutableStateOf(false) }
+    val result = remember(group.toolMessages) { group.toolMessages.toTaskResultSummary() }
 
     // 一「步」= 先说的那段话 + 为此做的操作。按真实顺序自上而下呈现:
     //   hsucode  先确认现有素材与入口。
@@ -110,6 +123,15 @@ fun AgentTurnBlock(group: TurnGroup, isStreaming: Boolean = false, onRegenerate:
             }
         }
 
+        if (result.hasEvidence) {
+            TaskResultPanel(
+                summary = result,
+                expanded = resultExpanded,
+                onExpandedChange = { resultExpanded = !resultExpanded },
+                onOpenWorkspace = onOpenWorkspace,
+            )
+        }
+
         // 步与步之间的细线分隔
         Box(Modifier.fillMaxWidth().padding(top = 4.dp).height(0.5.dp).background(Sub.copy(alpha = 0.3f)))
     }
@@ -139,13 +161,91 @@ fun ReasoningFoldable(msg: ChatState.MessageUi, isCurrentStreaming: Boolean = fa
         )
     }
     if (expanded) {
-        Text(
-            msg.reasoning,
-            fontSize = 11.sp,
-            fontFamily = JetBrainsMono,
-            color = Faint,
-            lineHeight = 16.sp,
-            modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 4.dp)
-        )
+        SelectionContainer {
+            Text(
+                msg.reasoning,
+                fontSize = 11.sp,
+                fontFamily = JetBrainsMono,
+                color = Faint,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(start = 12.dp, top = 2.dp, bottom = 4.dp)
+            )
+        }
+
+    }
+}
+
+private data class TaskResultSummary(
+    val editedFiles: List<String> = emptyList(),
+    val readFiles: List<String> = emptyList(),
+    val toolCount: Int = 0,
+    val failedTools: Int = 0,
+) {
+    val hasEvidence: Boolean get() = editedFiles.isNotEmpty() || readFiles.isNotEmpty() || toolCount > 0
+}
+
+private fun List<ChatState.MessageUi>.toTaskResultSummary(): TaskResultSummary {
+    val edits = mutableListOf<String>()
+    val reads = mutableListOf<String>()
+    var calls = 0
+    var failures = 0
+    forEach { message ->
+        when (val block = message.contentBlock) {
+            is MessageContent.FileEdit -> edits += block.path
+            is MessageContent.FileRead -> reads += block.path
+            is MessageContent.ToolCall -> {
+                calls += 1
+                if (block.status == ToolStatus.FAILED || (block.exitCode != null && block.exitCode != 0)) failures += 1
+            }
+            else -> Unit
+        }
+    }
+    return TaskResultSummary(edits.distinct(), reads.distinct(), calls, failures)
+}
+
+@Composable
+private fun TaskResultPanel(
+    summary: TaskResultSummary,
+    expanded: Boolean,
+    onExpandedChange: () -> Unit,
+    onOpenWorkspace: () -> Unit,
+) {
+    val colors = LocalHsuColors.current
+    val label = buildList {
+        if (summary.editedFiles.isNotEmpty()) add("${summary.editedFiles.size} 个文件变更")
+        if (summary.toolCount > 0) add("${summary.toolCount} 次执行")
+        if (summary.failedTools > 0) add("${summary.failedTools} 项失败")
+    }.joinToString(" · ").ifBlank { "查看本轮结果" }
+    Column(
+        Modifier.fillMaxWidth().padding(top = 6.dp)
+            .background(colors.bgElevated, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onExpandedChange() }
+            .padding(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.AssignmentTurnedIn, contentDescription = null, tint = if (summary.failedTools > 0) colors.red else colors.green, modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text("本轮结果", fontSize = 12.sp, color = colors.ink)
+                Text(label, fontSize = 11.sp, color = colors.sub, maxLines = 1)
+            }
+            Text(if (expanded) "收起" else "展开", fontSize = 11.sp, color = colors.green)
+        }
+        if (expanded) {
+            summary.editedFiles.take(6).forEach { path ->
+                Text("已修改  $path", fontSize = 11.sp, color = colors.ink, modifier = Modifier.padding(top = 8.dp))
+            }
+            if (summary.readFiles.isNotEmpty()) {
+                Text("已读取  ${summary.readFiles.take(3).joinToString("、")}", fontSize = 11.sp, color = colors.sub, modifier = Modifier.padding(top = 5.dp), maxLines = 2)
+            }
+            if (summary.failedTools > 0) {
+                Text("有 ${summary.failedTools} 个工具步骤失败，可展开执行记录查看原因后重试。", fontSize = 11.sp, color = colors.red, modifier = Modifier.padding(top = 5.dp))
+            }
+            if (summary.editedFiles.isNotEmpty()) {
+                OutlinedButton(onClick = onOpenWorkspace, modifier = Modifier.padding(top = 8.dp).height(40.dp)) {
+                    Icon(Icons.Outlined.FolderOpen, null, modifier = Modifier.size(17.dp)); Spacer(Modifier.width(5.dp)); Text("在工作区查看")
+                }
+            }
+        }
     }
 }

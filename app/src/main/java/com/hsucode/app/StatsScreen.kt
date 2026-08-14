@@ -50,8 +50,9 @@ private val CAT_COLORS = mapOf(
 
 private fun categoryOf(tool: String): String = when {
     tool in listOf("web_search", "web_fetch", "web_search_batch") -> "网络"
-    tool in listOf("file_read", "file_write", "file_edit", "edit", "multi_edit", "list_dir", "grep", "glob") -> "文件"
-    tool in listOf("shell_exec", "su_exec", "code_exec") -> "终端"
+    tool in listOf("file_read", "file_write", "file_edit", "edit", "multi_edit", "list_dir", "grep", "glob", "shizuku_file") -> "文件"
+    tool in listOf("shell_exec", "su_exec", "shizuku_exec", "shizuku_system", "shizuku_process_start", "shizuku_process_status", "shizuku_process_stop", "code_exec") -> "终端"
+    tool == "shizuku_ui" -> "自动化"
     tool in listOf("invoke_skill", "skill_manage") -> "技能"
     tool in listOf("dispatch_agents", "wolfpack_run") -> "子智能体"
     tool == "agent_plan" -> "计划"

@@ -94,6 +94,7 @@ fun SidebarContent(
     onSetActiveIdentity: (Long) -> Unit,
     onCreateIdentity: () -> Unit,
     onNavigateToIdentityList: () -> Unit,
+    onNavigateToWork: () -> Unit = {},
     onNavigateToSettings: () -> Unit,
     onClose: () -> Unit,
     onSearchMessages: suspend (String) -> List<SearchHit> = { emptyList() },
@@ -139,26 +140,24 @@ fun SidebarContent(
             .fillMaxWidth(0.82f)
             .background(Bg)
     ) {
-        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 16.dp, bottom = 16.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
                 Image(
                     painter = painterResource(R.drawable.hsucode_profile),
                     contentDescription = "HSUCODE 头像",
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp))
+                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
                 )
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("HSUCODE", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = Ink)
+                    Text("对话、项目与任务", fontSize = 12.sp, color = Sub)
+                }
                 IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Outlined.Close, contentDescription = "关闭导航", tint = Sub)
                 }
-            }
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "HSUCODE",
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 20.sp,
-                color = Ink
-            )
         }
 
         // ── New session capsule ──
@@ -177,7 +176,7 @@ fun SidebarContent(
         ) {
             Icon(Icons.Filled.Add, null, Modifier.size(16.dp), tint = Bg)
             Spacer(Modifier.width(8.dp))
-            Text("新对话", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Bg, letterSpacing = 0.02.sp)
+            Text("新对话", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Bg)
         }
 
         Spacer(Modifier.height(12.dp))
@@ -195,7 +194,7 @@ fun SidebarContent(
             modifier = Modifier
                 .padding(horizontal = 12.dp)
                 .fillMaxWidth()
-                .height(52.dp)
+                .height(48.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(xc.bgElevated)
                 .border(
@@ -237,7 +236,7 @@ fun SidebarContent(
         }
         Spacer(Modifier.height(8.dp))
 
-        val tabs = listOf("sessions" to "会话", "projects" to "项目", "work" to "工作")
+        val tabs = listOf("sessions" to "对话", "projects" to "项目", "work" to "任务")
         PrimaryTabRow(
             selectedTabIndex = tabs.indexOfFirst { it.first == sidebarTab },
             containerColor = Bg,
@@ -254,11 +253,17 @@ fun SidebarContent(
             }
         }
 
+        SidebarDestinationRow(
+            title = "任务工作台",
+            detail = "任务、审批与交付结果",
+            onClick = { onNavigateToWork(); onClose() }
+        )
+
         // ── LazyColumn ──
         LazyColumn(Modifier.weight(1f)) {
             if (searchQuery.length >= 2) {
                 item(key = "search_header") {
-                    SectionHeaderRow("SEARCH · ${searchHits.size}")
+                    SectionHeaderRow("搜索结果 · ${searchHits.size} 项")
                 }
                 items(searchHits, key = { "hit_${it.messageId}" }) { hit ->
                     Column(
@@ -292,7 +297,7 @@ fun SidebarContent(
             // STARRED
             if (sidebarTab == "sessions" && starredSessions.isNotEmpty()) {
                 item(key = "header_starred") {
-                    SectionHeaderRow("STARRED")
+                    SectionHeaderRow("收藏")
                 }
                 items(starredSessions, key = { "star_${it.id}" }) { session ->
                     ConversationRow(
@@ -315,8 +320,8 @@ fun SidebarContent(
             }
             if (sidebarTab == "work" && goalSessions.isEmpty()) {
                 item(key = "goal_empty") {
-                    Text("＋ 新建目标任务:给它一个目标,自主完成后通知你",
-                        fontSize = 11.sp, color = Sub, fontFamily = FontFamily.Serif,
+                    Text("新建目标任务，交给 HSUCODE 自主执行并在完成后通知你",
+                        fontSize = 12.sp, color = Sub,
                         modifier = Modifier.padding(start = 20.dp, end = 12.dp, top = 2.dp, bottom = 6.dp)
                             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onCreateGoal(); onClose() })
                 }
@@ -341,8 +346,8 @@ fun SidebarContent(
             }
             if (sidebarTab == "work" && groupRooms.isEmpty()) {
                 item(key = "group_empty") {
-                    Text("＋ 新建群聊:多个智能体同处一室,@ 谁谁回答",
-                        fontSize = 11.sp, color = Sub, fontFamily = FontFamily.Serif,
+                    Text("新建群聊，让多个智能体在同一任务上下文中协作",
+                        fontSize = 12.sp, color = Sub,
                         modifier = Modifier.padding(start = 20.dp, end = 12.dp, top = 2.dp, bottom = 6.dp)
                             .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onOpenGroupRooms(); onClose() })
                 }
@@ -367,9 +372,19 @@ fun SidebarContent(
             }
 
             // RECENTS (ungrouped)
+            if (sidebarTab == "sessions" && starredSessions.isEmpty() && ungroupedSessions.isEmpty()) {
+                item(key = "sessions_empty") {
+                    SidebarEmptyState(
+                        title = "还没有对话",
+                        detail = "新建一个对话，开始交给 HSUCODE 处理",
+                        action = "新建对话",
+                        onClick = { onCreateNew(); onClose() }
+                    )
+                }
+            }
             if (sidebarTab == "sessions" && ungroupedSessions.isNotEmpty()) {
                 item(key = "header_recents") {
-                    SectionHeaderRow("RECENTS")
+                    SectionHeaderRow("最近对话")
                 }
                 items(ungroupedSessions, key = { "ungrp_${it.id}" }) { session ->
                     ConversationRow(
@@ -388,6 +403,16 @@ fun SidebarContent(
             if (sidebarTab == "projects") {
                 item(key = "header_projects") {
                     SectionHeaderRow("项目", onAddProject = { showCreateProject = true })
+                }
+                if (projects.isEmpty()) {
+                    item(key = "projects_empty") {
+                        SidebarEmptyState(
+                            title = "还没有项目",
+                            detail = "用项目整理会话，并为每个项目绑定工作目录",
+                            action = "新建项目",
+                            onClick = { showCreateProject = true }
+                        )
+                    }
                 }
                 items(projects, key = { "proj_${it.id}" }) { project ->
                     val sessions = projectSessionsMap[project.id] ?: emptyList()
@@ -516,6 +541,27 @@ fun SidebarContent(
 
 // ── Sub-components ──
 
+@Composable
+private fun SidebarEmptyState(
+    title: String,
+    detail: String,
+    action: String,
+    onClick: () -> Unit,
+) {
+    val xc = LocalHsuColors.current
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 28.dp),
+        horizontalAlignment = Alignment.Start,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = xc.ink)
+        Text(detail, style = MaterialTheme.typography.bodySmall, color = xc.sub, lineHeight = 18.sp)
+        TextButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+            Text(action, color = xc.green)
+        }
+    }
+}
+
 /** 侧栏 Goal 任务行:标题 + 状态点(运行中/已达成/未达成)+ 实时状态小字。长按删除。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -555,12 +601,32 @@ private fun SectionHeaderRow(label: String, onAddProject: (() -> Unit)? = null) 
         modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = Sub, letterSpacing = 0.08.sp, modifier = Modifier.weight(1f))
+        Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Sub, modifier = Modifier.weight(1f))
         if (onAddProject != null) {
-            IconButton(onClick = onAddProject, modifier = Modifier.size(20.dp)) {
-                Icon(Icons.Outlined.Add, "新建项目", Modifier.size(14.dp), tint = Sub)
+            IconButton(onClick = onAddProject, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Outlined.Add, "新建", Modifier.size(20.dp), tint = Sub)
             }
         }
+    }
+}
+
+@Composable
+private fun SidebarDestinationRow(title: String, detail: String, onClick: () -> Unit) {
+    val colors = LocalHsuColors.current
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 12.dp)
+            .clip(RoundedCornerShape(8.dp)).background(colors.activeBg)
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onClick() }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Outlined.FolderOpen, contentDescription = null, tint = colors.green, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colors.ink)
+            Text(detail, fontSize = 11.sp, color = colors.sub, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Icon(Icons.Outlined.MoreHoriz, contentDescription = "打开任务工作台", tint = colors.sub, modifier = Modifier.size(20.dp))
     }
 }
 

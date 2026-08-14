@@ -79,7 +79,16 @@ class AgentChatState(
     // B2:本会话绑定的工作区根 + 项目 id(由 app 的 applyWorkspaceForSession 设置)。
     // scope 携带 WorkspaceThreadElement,使本会话在自己作用域里跑工具时,工作区/记忆隔离到自己的值,
     // 不被别的会话切换污染(无覆盖时回退全局)。
-    @Volatile var sessionWorkspaceRoot: String = com.hsucode.tools.WorkspaceContext.DEFAULT_ROOT
+    // Use the runtime default (application-private workspace after startup), not the
+    // legacy shared-storage constant.  The latter could be observed during the short
+    // window before HsucodeApplication finished loading persisted workspace settings.
+    private val sessionWorkspaceRootState =
+        mutableStateOf(com.hsucode.tools.WorkspaceContext.defaultRoot)
+    var sessionWorkspaceRoot: String
+        get() = sessionWorkspaceRootState.value
+        set(value) {
+            sessionWorkspaceRootState.value = value.trimEnd('/')
+        }
     @Volatile var sessionProjectId: Long = 0L
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Main +
@@ -88,6 +97,9 @@ class AgentChatState(
 
     // Hermes-③ 缓存纪律:记住上次注入的分层系统提示,内容不变就不重写 messages[0]。
     private var lastLayeredSystemPrompt: String? = null
+    // The workspace is part of the tool contract. Rebuild the frozen prompt when it changes
+    // so the model never keeps an old absolute output directory in memory.
+    private var systemPromptWorkspaceRoot: String? = null
     // DeepSeek 缓存优化:系统提示前缀已为哪个会话冻结(-999=未冻结);会话不变则不重建前缀。
     private var systemPromptSessionId: Long = -999L
 
@@ -135,8 +147,10 @@ class AgentChatState(
         return try {
             val json = org.json.JSONObject(arguments)
             when (toolName) {
-                "shell_exec", "su_exec", "env_exec" -> json.optString("command", arguments).take(60)
-                "file_read", "file_write" -> json.optString("path", arguments)
+                "shell_exec", "su_exec", "env_exec", "shizuku_exec", "shizuku_process_start" -> json.optString("command", arguments).take(60)
+                "file_read", "file_write", "shizuku_file" -> json.optString("path", arguments)
+                "shizuku_system", "shizuku_ui" -> json.optString("action", arguments).take(60)
+                "shizuku_process_status", "shizuku_process_stop" -> json.optString("id", arguments).take(60)
                 "web_search" -> "\"${json.optString("query", arguments).take(40)}\""
                 "web_fetch" -> json.optString("url", arguments)
                 else -> arguments.take(50)
@@ -245,10 +259,10 @@ class AgentChatState(
 
     private fun extractCommand(toolName: String, arguments: String): String {
         return when (toolName) {
-            "shell_exec", "su_exec", "env_exec" -> {
+            "shell_exec", "su_exec", "env_exec", "shizuku_exec", "shizuku_process_start" -> {
                 try { org.json.JSONObject(arguments).optString("command", arguments) } catch (_: Exception) { arguments }
             }
-            "file_read", "file_write" -> {
+            "file_read", "file_write", "shizuku_file" -> {
                 try { org.json.JSONObject(arguments).optString("path", arguments) } catch (_: Exception) { arguments }
             }
             else -> arguments
@@ -297,10 +311,10 @@ class AgentChatState(
 
     private fun extractConfirmCommand(cmd: GateCommand): String {
         return when (cmd.toolName) {
-            "shell_exec", "su_exec", "env_exec" -> {
+            "shell_exec", "su_exec", "env_exec", "shizuku_exec", "shizuku_process_start" -> {
                 try { org.json.JSONObject(cmd.toolArgs).optString("command", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
             }
-            "file_read", "file_write" -> {
+            "file_read", "file_write", "shizuku_file" -> {
                 try { org.json.JSONObject(cmd.toolArgs).optString("path", cmd.toolArgs) } catch (_: Exception) { cmd.toolArgs }
             }
             else -> cmd.toolArgs
@@ -588,7 +602,9 @@ class AgentChatState(
                     // DeepSeek 缓存优化(Reasonix「boot 一次」):系统提示前缀**按会话冻结一次**,
                     // 会话期间绝不重建——即使后台复盘中途改了记忆,也留到下次会话生效,
                     // 从而让 DeepSeek 自动前缀缓存整段会话保持命中(易变态改走 turn tail)。
-                    if (currentSessionId != systemPromptSessionId) {
+                    if (currentSessionId != systemPromptSessionId ||
+                        sessionWorkspaceRoot != systemPromptWorkspaceRoot
+                    ) {
                         val curatedUser = try { database.settingDao().get(CuratedMemory.keyFor("user")) } catch (_: Exception) { null }
                         val curatedSituation = try { database.settingDao().get(CuratedMemory.keyFor("memory")) } catch (_: Exception) { null }
                         val subAgents = try {
@@ -618,11 +634,13 @@ class AgentChatState(
                             curatedUser = curatedUser,
                             curatedSituation = curatedSituation,
                             availableSubAgents = subAgents,
-                            crossConvoMemory = crossConvoMemory
+                            crossConvoMemory = crossConvoMemory,
+                            workspaceRoot = sessionWorkspaceRoot
                         )
                         agentCore.updateSystemPrompt(layered)
                         lastLayeredSystemPrompt = layered
                         systemPromptSessionId = currentSessionId
+                        systemPromptWorkspaceRoot = sessionWorkspaceRoot
                     }
                     agentCore.temperature = identity?.temperature ?: 1.0f
                     // gap-09 采样参数:从 identity 卡注入(null=不发)。

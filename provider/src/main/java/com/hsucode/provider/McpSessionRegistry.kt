@@ -3,9 +3,12 @@ package com.hsucode.provider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 
-/** Owns MCP transports and retries a dropped HTTP/SSE or stdio session once. */
+/** Owns MCP transports and retries a dropped HTTP/SSE or stdio session with bounded backoff. */
 class McpSessionRegistry {
     enum class Status { CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, ERROR }
     data class SessionState(val key: String, val status: Status, val attempts: Int = 0, val message: String = "")
@@ -39,24 +42,27 @@ class McpSessionRegistry {
     ) : McpTransport {
         @Volatile private var delegate: McpTransport? = null
         @Volatile private var attempts = 0
+        @Volatile private var serverInfo: McpServerInfo? = null
+        private val connectLock = Mutex()
 
-        private suspend fun current(): McpTransport {
-            delegate?.let { return it }
-            val created = factory()
-            delegate = created
-            return created
+        private suspend fun current(): McpTransport = connectLock.withLock {
+            delegate ?: factory().also { delegate = it }
         }
 
         override suspend fun initialize(): McpServerInfo {
             onState(SessionState(key, Status.CONNECTING, attempts))
             return try {
                 val info = current().initialize()
+                serverInfo = info
                 attempts = 0
                 onState(SessionState(key, Status.CONNECTED, attempts))
                 info
             } catch (error: Exception) {
-                onState(SessionState(key, Status.ERROR, attempts, error.message.orEmpty()))
-                throw error
+                // Drop a half-initialized transport; a later reconnect must create a fresh process/socket.
+                delegate?.close()
+                delegate = null
+                reconnect().getOrThrow()
+                serverInfo ?: throw error
             }
         }
 
@@ -67,24 +73,54 @@ class McpSessionRegistry {
 
         private suspend fun <T> retry(operation: suspend (McpTransport) -> T): T {
             try { return operation(current()) } catch (first: Exception) {
-                onState(SessionState(key, Status.RECONNECTING, ++attempts, first.message.orEmpty()))
                 reconnect().getOrThrow()
                 return operation(current())
             }
         }
 
-        suspend fun reconnect(): Result<Unit> = runCatching {
-            delegate?.close()
-            val next = factory()
-            delegate = next
-            next.initialize()
-            attempts = 0
-            onState(SessionState(key, Status.CONNECTED, attempts))
-        }.onFailure { onState(SessionState(key, Status.ERROR, attempts, it.message.orEmpty())) }
+        suspend fun reconnect(): Result<Unit> {
+            var lastError: Exception? = null
+            return try {
+                connectLock.withLock {
+                    delegate?.close()
+                    delegate = null
+                    repeat(3) { index ->
+                        attempts = index + 1
+                        onState(SessionState(key, Status.RECONNECTING, attempts, lastError?.message.orEmpty()))
+                        val next = try { factory() } catch (error: Exception) {
+                            lastError = error
+                            null
+                        }
+                        if (next != null) {
+                            try {
+                                val info = next.initialize()
+                                delegate = next
+                                serverInfo = info
+                                attempts = 0
+                                onState(SessionState(key, Status.CONNECTED, attempts))
+                                return@withLock Result.success(Unit)
+                            } catch (error: Exception) {
+                                next.close()
+                                lastError = error
+                            }
+                        }
+                        if (index < 2) delay(250L shl index)
+                    }
+                    Result.failure(lastError ?: IllegalStateException("MCP 重连失败"))
+                }
+            } catch (error: Exception) {
+                Result.failure(error)
+            }.also { result ->
+                result.exceptionOrNull()?.let {
+                    onState(SessionState(key, Status.ERROR, attempts, it.message.orEmpty()))
+                }
+            }
+        }
 
         override fun close() {
             delegate?.close()
             delegate = null
+            serverInfo = null
         }
     }
 }

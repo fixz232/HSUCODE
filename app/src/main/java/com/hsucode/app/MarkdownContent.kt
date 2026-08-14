@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -41,9 +42,10 @@ fun MarkdownContent(content: String, modifier: Modifier = Modifier) {
     val xc = LocalHsuColors.current
     val blocks = remember(content) { parseMarkdownBlocks(content) }
 
-    Column(modifier = modifier) {
-        blocks.forEach { block ->
-            when (block) {
+    SelectionContainer {
+        Column(modifier = modifier) {
+            blocks.forEach { block ->
+                when (block) {
                 is MarkdownBlock.TextSpan ->
                     if (block.content.isNotBlank()) {
                         InlineText(block.content, 13.sp, xc.ink)
@@ -95,6 +97,7 @@ fun MarkdownContent(content: String, modifier: Modifier = Modifier) {
                 )
 
                 is MarkdownBlock.Table -> MarkdownTable(block, xc)
+                }
             }
         }
     }

@@ -29,6 +29,12 @@ class SecurityGateTest {
         assertTrue(decide(g, "shell_exec", shell("echo hi"), PermissionMode.ALLOW_ALL) is Decision.Allow)
     }
 
+    @Test fun autoApproveRisk_allowsNormalButAsksDangerous() {
+        val g = gate()
+        assertTrue(decide(g, "shell_exec", shell("touch notes.txt"), PermissionMode.AUTO_APPROVE_RISK) is Decision.Allow)
+        assertTrue(decide(g, "shell_exec", shell("rm -rf /data/data/x"), PermissionMode.AUTO_APPROVE_RISK) is Decision.NeedConfirm)
+    }
+
     @Test fun fatal_alwaysDenied() {
         val g = gate()
         assertTrue(decide(g, "shell_exec", shell("rm -rf /"), PermissionMode.ALLOW_ALL) is Decision.Denied)
@@ -101,5 +107,18 @@ class SecurityGateTest {
         val g = gate()
         g.setPermissionRules(listOf(PermissionRuleEntity(action = "allow", toolFilter = "shell_exec", pattern = "*npm*", createdAt = 0)))
         assertTrue(decide(g, "shell_exec", shell("npm install"), PermissionMode.ASK) is Decision.Allow)
+    }
+
+    @Test fun shizuku_readOnlyActions_areSafe() {
+        val g = gate()
+        assertTrue(decide(g, "shizuku_file", "{\"action\":\"list\",\"path\":\"/sdcard\"}", PermissionMode.ASK) is Decision.Allow)
+        assertTrue(decide(g, "shizuku_system", "{\"action\":\"get_property\",\"key\":\"ro.build.version.release\"}", PermissionMode.READ_ONLY) is Decision.Allow)
+        assertTrue(decide(g, "shizuku_process_status", "{}", PermissionMode.ASK) is Decision.Allow)
+    }
+
+    @Test fun shizuku_mutatingActions_requireApprovalOrReadOnlyDeny() {
+        val g = gate()
+        assertTrue(decide(g, "shizuku_file", "{\"action\":\"delete\",\"path\":\"/sdcard/tmp\"}", PermissionMode.ASK) is Decision.NeedConfirm)
+        assertTrue(decide(g, "shizuku_system", "{\"action\":\"put_setting\",\"namespace\":\"system\",\"key\":\"screen_brightness\",\"value\":\"1\"}", PermissionMode.READ_ONLY) is Decision.Denied)
     }
 }

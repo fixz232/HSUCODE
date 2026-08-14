@@ -44,6 +44,10 @@ import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TravelExplore
+import androidx.compose.material.icons.outlined.PlayCircleOutline
+import androidx.compose.material.icons.outlined.TaskAlt
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
@@ -59,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,6 +91,7 @@ import java.util.concurrent.TimeUnit
 @Composable
 fun DeveloperWorkbenchScreen(
     workspaceRoot: String,
+    runtime: TaskRuntimeManager,
     onBack: () -> Unit,
     onFiles: () -> Unit,
     onDocuments: () -> Unit,
@@ -94,11 +100,18 @@ fun DeveloperWorkbenchScreen(
     onPrompts: () -> Unit,
     onTerminal: () -> Unit,
     onEnvironment: () -> Unit,
-    onGit: () -> Unit
+    onGit: () -> Unit,
+    onReview: () -> Unit,
+    onBrowser: () -> Unit,
+    onAutomation: () -> Unit,
+    onWorkflow: () -> Unit,
+    onRoles: () -> Unit,
 ) {
     val colors = LocalHsuColors.current
     val runtimeReady = WorkspaceRuntime.hasLinux()
     val rootLabel = workspaceRoot.ifBlank { UserWorkspaceShell.displayPath() }
+    val tasks by runtime.tasks.collectAsState()
+    val activeTasks = tasks.filter { it.status in setOf(TaskRunStatus.RUNNING, TaskRunStatus.QUEUED, TaskRunStatus.WAITING_PERMISSION) }
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(colors.bg),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -109,7 +122,7 @@ fun DeveloperWorkbenchScreen(
         }
         item {
             Text(
-                if (runtimeReady) "Ubuntu 环境已就绪" else "Android Shell 工作区",
+                if (activeTasks.isNotEmpty()) "${activeTasks.size} 个任务正在关联此工作区" else if (runtimeReady) "Ubuntu 环境已就绪" else "Android Shell 工作区",
                 style = MaterialTheme.typography.titleMedium,
                 color = colors.ink
             )
@@ -124,11 +137,47 @@ fun DeveloperWorkbenchScreen(
             )
         }
         item {
+            Text("继续工作", style = MaterialTheme.typography.labelLarge, color = colors.sub, modifier = Modifier.padding(top = 4.dp))
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                CompactAction(Icons.Outlined.FolderOpen, "文件", Modifier.weight(1f), onFiles)
+                CompactAction(Icons.Outlined.PlayCircleOutline, "运行", Modifier.weight(1f), onTerminal)
+                CompactAction(Icons.Outlined.TaskAlt, "审查", Modifier.weight(1f), onReview)
+            }
+        }
+        if (activeTasks.isNotEmpty()) {
+            item {
+                ElevatedCard(
+                    colors = CardDefaults.elevatedCardColors(containerColor = colors.bgElevated),
+                    elevation = CardDefaults.elevatedCardElevation(defaultElevation = 0.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("当前任务", style = MaterialTheme.typography.titleSmall, color = colors.ink)
+                        Text(activeTasks.first().title, style = MaterialTheme.typography.bodyMedium, color = colors.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 5.dp))
+                        Text(activeTasks.first().checkpoint.ifBlank { "查看任务状态和权限请求" }, style = MaterialTheme.typography.bodySmall, color = colors.sub, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+        item {
+            Text("项目能力", style = MaterialTheme.typography.labelLarge, color = colors.sub, modifier = Modifier.padding(top = 8.dp))
+        }
+        item {
             WorkbenchRow(
                 icon = Icons.Outlined.FolderOpen,
                 title = "文件工作区",
                 summary = "浏览、读写、搜索、导入导出、解压与 HTML 导出",
                 onClick = onFiles
+            )
+        }
+        item {
+            WorkbenchRow(
+                icon = Icons.Outlined.Language,
+                title = "浏览器 Agent",
+                summary = "受控网页浏览、正文提取、元素点击和表单填写",
+                onClick = onBrowser
             )
         }
         item {
@@ -164,11 +213,17 @@ fun DeveloperWorkbenchScreen(
             )
         }
         item {
-            Text("运行与协作", style = MaterialTheme.typography.labelLarge, color = colors.sub, modifier = Modifier.padding(top = 10.dp))
+            Text("协作与自动化", style = MaterialTheme.typography.labelLarge, color = colors.sub, modifier = Modifier.padding(top = 10.dp))
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                CompactAction(Icons.Outlined.Terminal, "终端", Modifier.weight(1f), onTerminal)
+                CompactAction(Icons.Outlined.AutoAwesome, "自动化", Modifier.weight(1f), onAutomation)
+                CompactAction(Icons.Outlined.TravelExplore, "工作流", Modifier.weight(1f), onWorkflow)
+                CompactAction(Icons.Outlined.Extension, "角色", Modifier.weight(1f), onRoles)
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 CompactAction(Icons.Outlined.Code, "环境", Modifier.weight(1f), onEnvironment)
                 CompactAction(Icons.Outlined.Archive, "Git", Modifier.weight(1f), onGit)
             }

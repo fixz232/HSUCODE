@@ -29,6 +29,13 @@ object ToolLabels {
         "shell_exec" to "执行",
         "su_exec" to "root 执行",
         "env_exec" to "环境内执行",
+        "shizuku_exec" to "Shizuku 执行",
+        "shizuku_file" to "Shizuku 文件",
+        "shizuku_system" to "Shizuku 系统",
+        "shizuku_ui" to "Shizuku 自动化",
+        "shizuku_process_start" to "启动 Shizuku 进程",
+        "shizuku_process_status" to "Shizuku 进程状态",
+        "shizuku_process_stop" to "停止 Shizuku 进程",
         "execute_code" to "运行脚本",
         "recall_memory" to "检索记忆",
         "save_memory" to "记住",
@@ -42,7 +49,10 @@ object ToolLabels {
         "describe_image" to "识别图片",
         "ask_reasoning" to "深度推理",
         "translate_text" to "翻译",
-        "transcribe_audio" to "语音转写"
+        "transcribe_audio" to "语音转写",
+        "document_create" to "生成文档",
+        "document_extract" to "读取文档",
+        "document_convert" to "转换文档"
     )
 
     /** 这些动词单独成句更自然,不再追加参数摘要。 */
@@ -65,6 +75,13 @@ object ToolLabels {
         "shell_exec" to listOf("command", "cmd"),
         "su_exec" to listOf("command", "cmd"),
         "env_exec" to listOf("command", "cmd"),
+        "shizuku_exec" to listOf("command", "cmd"),
+        "shizuku_file" to listOf("action", "path"),
+        "shizuku_system" to listOf("action", "package", "key"),
+        "shizuku_ui" to listOf("action", "x", "y"),
+        "shizuku_process_start" to listOf("command"),
+        "shizuku_process_status" to listOf("id"),
+        "shizuku_process_stop" to listOf("id"),
         "recall_memory" to listOf("query"),
         "save_memory" to listOf("title", "content"),
         "invoke_skill" to listOf("name"),
@@ -73,7 +90,10 @@ object ToolLabels {
         "describe_image" to listOf("path", "url"),
         "ask_reasoning" to listOf("question", "prompt"),
         "translate_text" to listOf("text"),
-        "dispatch_agents" to listOf("task", "tasks")
+        "dispatch_agents" to listOf("task", "tasks"),
+        "document_create" to listOf("format", "title", "file_name"),
+        "document_extract" to listOf("path"),
+        "document_convert" to listOf("input_path", "output_format")
     )
 
     private const val MAX_PREVIEW = 60
@@ -99,8 +119,8 @@ object ToolLabels {
         if (raw.isBlank()) return ""
 
         val shaped = when (toolName) {
-            "shell_exec", "su_exec", "env_exec" -> summarizeCommand(raw)
-            "file_read", "file_write", "file_edit", "multi_edit", "list_dir", "describe_image" -> shortPath(raw)
+            "shell_exec", "su_exec", "env_exec", "shizuku_exec", "shizuku_process_start" -> summarizeCommand(raw)
+            "file_read", "file_write", "file_edit", "multi_edit", "list_dir", "describe_image", "shizuku_file" -> shortPath(raw)
             else -> raw
         }
         return oneLine(shaped).take(MAX_PREVIEW)

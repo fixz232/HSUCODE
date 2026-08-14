@@ -71,18 +71,30 @@ class GrepTool : Tool {
             }
             if (!isProbablyText(f)) continue
             val rel = relPath(f)
-            val lines = try { f.readLines() } catch (_: Exception) { continue }
-            for ((i, line) in lines.withIndex()) {
-                if (regex.containsMatchIn(line)) {
-                    totalCount++
-                    matchedFiles.add(rel)
-                    if (mode == "content") {
-                        contentLines.add("$rel:${i + 1}: ${line.trimEnd().take(400)}")
-                        if (contentLines.size >= headLimit) break@outer
+            var reachedLimit = false
+            try {
+                val reader = f.bufferedReader()
+                try {
+                    var lineNumber = 0
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        lineNumber++
+                        if (!regex.containsMatchIn(line)) continue
+                        totalCount++
+                        matchedFiles.add(rel)
+                        if (mode == "content") {
+                            contentLines.add("$rel:$lineNumber: ${line.trimEnd().take(400)}")
+                            if (contentLines.size >= headLimit) { reachedLimit = true; break }
+                        }
+                        if (mode == "count" && totalCount >= headLimit * 50) { reachedLimit = true; break }
                     }
-                    if (mode == "count" && totalCount >= headLimit * 50) break@outer
+                } finally {
+                    reader.close()
                 }
+            } catch (_: Exception) {
+                continue
             }
+            if (reachedLimit) break@outer
             if (mode == "files_with_matches" && matchedFiles.size >= headLimit) break
         }
 

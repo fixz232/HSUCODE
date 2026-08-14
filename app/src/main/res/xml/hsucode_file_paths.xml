@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path name="workspace_files" path="workspace/" />
+    <external-files-path name="app_external_files" path="." />
+    <external-path name="legacy_hsucode_workspace" path="HSUCODE/" />
+</paths>

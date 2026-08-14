@@ -32,6 +32,7 @@ class CronWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
         if (due.isEmpty()) return Result.success()
 
         for (job in due) {
+            app.taskRuntime.updateExternal("cron:${job.id}", "cron", job.name.ifBlank { "定时任务 #${job.id}" }, TaskRunStatus.RUNNING, "正在执行")
             try {
                 val output = runJob(app, job.prompt)
                 if (job.deliver == "notify") notify(applicationContext, job.name.ifBlank { "定时任务" }, output.take(400))
@@ -44,9 +45,11 @@ class CronWorker(appContext: Context, params: WorkerParameters) : CoroutineWorke
                     enabled = job.scheduleKind == "interval",
                     updatedAt = now
                 ))
+                app.taskRuntime.updateExternal("cron:${job.id}", "cron", job.name.ifBlank { "定时任务 #${job.id}" }, TaskRunStatus.SUCCEEDED, "已完成", 100)
             } catch (e: Exception) {
                 Log.w(TAG, "job #${job.id} failed: ${e.message}")
                 db.cronJobDao().update(job.copy(lastRunAt = now, lastStatus = "err:${e.message?.take(80)}", updatedAt = now))
+                app.taskRuntime.updateExternal("cron:${job.id}", "cron", job.name.ifBlank { "定时任务 #${job.id}" }, TaskRunStatus.FAILED, e.message.orEmpty())
             }
         }
         return Result.success()

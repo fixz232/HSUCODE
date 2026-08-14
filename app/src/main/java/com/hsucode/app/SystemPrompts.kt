@@ -32,6 +32,12 @@ const val BASE_SYSTEM_PROMPT = "你是 HSUCODE —— 一个运行在 Android �
     "- 同一个调用连续失败两次以上,说明你的判断有误,换思路或直接告诉用户卡在哪,\n" +
     "  不要一遍遍重复同一个调用。\n" +
     "- 工具名必须从可用工具清单里逐字照抄。清单里没有的名字一律不要发明。\n\n" +
+    "PPTX 制作规则【重要】:\n" +
+    "- 用户要求制作 PPT 时，先确定目标、受众、时长和页数；信息不足时采用合理默认值并说明，不要把报告原文直接堆到页面里。\n" +
+    "- 必须优先调用 document_create 的结构化 slides 参数，而不是只传 Markdown。每页只表达一个结论：标题写结论，正文最多 3 至 5 个短要点。\n" +
+    "- 按内容选择版式：数据用 data + chart；对比用 comparison；流程用 process；时间顺序用 timeline；结构化数据用 table；关键数字用 metrics；有真实图片时用 image_text。\n" +
+    "- 图片必须来自用户提供、工作区现有文件或 HTTPS 来源；没有可核验素材时不要伪造图片。生成前至少配置 purpose、audience、template、aspect_ratio，并填写每页 notes 作为讲稿。\n" +
+    "- 调用 document_create 后，检查返回结果；若工具报内容密度、图片或数据错误，先修正 slides 再交付。\n\n" +
     "输出风格:\n" +
     "- 不使用 emoji 表情符号(任何场合)\n" +
     "- 保持简洁、技术化、有条理\n" +
@@ -86,7 +92,8 @@ fun buildLayeredSystemPrompt(
     curatedUser: String? = null,        // Hermes-⑤ 耐久用户模型 USER.md
     curatedSituation: String? = null,   // Hermes-⑤ 近况 MEMORY.md
     availableSubAgents: List<Pair<String, String>> = emptyList(),  // 子智能体 (name, description)
-    crossConvoMemory: String? = null    // 跨对话记忆摘要(当前范围内其它对话沉淀的要点),让模型天然有"大概记忆"
+    crossConvoMemory: String? = null,   // 跨对话记忆摘要(当前范围内其它对话沉淀的要点),让模型天然有"大概记忆"
+    workspaceRoot: String? = null       // 当前会话的文件输出根目录
 ): String {
     return buildString {
         append(BASE_SYSTEM_PROMPT)
@@ -144,6 +151,12 @@ fun buildLayeredSystemPrompt(
         append("`/data/user/0/com.hsucode.app`),尤其是里面的 `databases/`、`shared_prefs/`。")
         append("动了它,应用下次就打不开数据库,用户的会话、身份卡、供应商配置、记忆会全部丢失。")
         append("装技能用技能管理,存文件写工作区,存知识用记忆工具——没有任何理由去碰那个目录。\n")
+        if (!workspaceRoot.isNullOrBlank()) {
+            append("【当前会话工作区】所有相对文件路径都以此目录为根: `")
+            append(workspaceRoot.trimEnd('/'))
+            append("`。生成、下载、导出文件时必须使用相对路径或该目录下的路径，禁止使用旧的固定目录 `/storage/emulated/0/HSUCODE`。\n")
+        }
+        append("【文件交付】file_write、document_create、download_file 成功后会自动把文件同步到手机公共存储的 `Download/HSUCODE/yyyy-MM-dd/` 目录；工具返回的手机路径就是最终交付位置。\n")
         // 子智能体:你是【主脑】。复杂任务可拆给下列专职子智能体【并行】处理(用 dispatch_agents,
         // 传 assignments=[{agent,task}...]),各用各的专属技能/工具,最后把结论汇总回你。
         if (availableSubAgents.isNotEmpty()) {

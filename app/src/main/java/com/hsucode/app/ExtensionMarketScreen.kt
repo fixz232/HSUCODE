@@ -11,11 +11,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Terminal
@@ -29,7 +33,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,7 +56,7 @@ import okhttp3.Request
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
-private enum class ExtensionTab(val label: String) { MCP("MCP"), SKILLS("Skills") }
+private enum class ExtensionTab(val label: String) { MCP("MCP"), SKILLS("Skills"), MANIFESTS("清单") }
 private enum class MarketMcpKind { STDIO, REMOTE }
 
 private data class MarketMcp(
@@ -138,6 +144,18 @@ fun ExtensionMarketScreen(
     var notice by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
     var authPreset by remember { mutableStateOf<MarketMcp?>(null) }
     var remoteSkill by remember { mutableStateOf(false) }
+    var manifestDialog by remember { mutableStateOf(false) }
+    var manifests by remember { mutableStateOf<List<ExtensionManifest>>(emptyList()) }
+
+    fun refreshManifests() {
+        scope.launch(Dispatchers.IO) {
+            manifests = database.settingDao().getByPrefix("extension_manifest_")
+                .mapNotNull { runCatching { ExtensionManifestValidator.parse(it.value).getOrThrow() }.getOrNull() }
+                .sortedBy { it.name.lowercase() }
+        }
+    }
+
+    LaunchedEffect(Unit) { refreshManifests() }
 
     fun installMcp(item: MarketMcp, auth: String = "") {
         if (item.kind == MarketMcpKind.STDIO && WorkspaceRuntime.backend() != WorkspaceRuntime.Backend.PROOT_UBUNTU) {
@@ -163,12 +181,14 @@ fun ExtensionMarketScreen(
 
     Column(Modifier.fillMaxSize().background(colors.bg)) {
         WorkbenchTopBar("MCP 与 Skills 市场", onBack)
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ExtensionTab.values().forEach { item ->
                 FilterChip(selected = tab == item, onClick = { tab = item }, label = { Text(item.label) }, shape = RoundedCornerShape(8.dp))
             }
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = if (tab == ExtensionTab.MCP) onManageMcp else onManageSkills) { Text("已安装") }
+            if (tab != ExtensionTab.MANIFESTS) {
+                TextButton(onClick = if (tab == ExtensionTab.MCP) onManageMcp else onManageSkills) { Text("已安装") }
+            }
         }
         notice?.let { (text, isError) -> InlineNotice(text, isError) { notice = null } }
         if (tab == ExtensionTab.MCP) {
@@ -207,7 +227,7 @@ fun ExtensionMarketScreen(
                     }
                 }
             }
-        } else {
+        } else if (tab == ExtensionTab.SKILLS) {
             LazyColumn(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -246,6 +266,90 @@ fun ExtensionMarketScreen(
                         Text("从 URL 导入 SKILL.md")
                     }
                 }
+                item {
+                    OutlinedButton(onClick = { manifestDialog = true }, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+                        Icon(Icons.Outlined.Extension, null, modifier = Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text("导入扩展清单")
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item {
+                    Text(
+                        "清单是扩展的可审查描述。安装前确认版本、来源和权限；当前运行时只允许安全的 skill 类型。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.sub,
+                    )
+                }
+                if (manifests.isEmpty()) {
+                    item {
+                        ElevatedCard(
+                            colors = CardDefaults.elevatedCardColors(containerColor = colors.bgElevated),
+                            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 0.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(Icons.Outlined.Extension, null, tint = colors.sub, modifier = Modifier.size(22.dp))
+                                Text("还没有扩展清单", style = MaterialTheme.typography.titleSmall, color = colors.ink)
+                                Text("从 Skills 标签导入清单后，这里会显示版本、来源和权限。", style = MaterialTheme.typography.bodySmall, color = colors.sub)
+                            }
+                        }
+                    }
+                }
+                items(manifests, key = { it.id }) { manifest ->
+                    ElevatedCard(
+                        colors = CardDefaults.elevatedCardColors(containerColor = colors.bgElevated),
+                        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 0.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Outlined.Extension, null, tint = colors.green, modifier = Modifier.size(22.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(manifest.name, style = MaterialTheme.typography.titleSmall, color = colors.ink)
+                                    Text("${manifest.kind} · v${manifest.version}", style = MaterialTheme.typography.labelMedium, color = colors.sub)
+                                }
+                                Text("已安装", style = MaterialTheme.typography.labelMedium, color = colors.green)
+                            }
+                            if (manifest.description.isNotBlank()) Text(manifest.description, style = MaterialTheme.typography.bodySmall, color = colors.sub)
+                            Row(verticalAlignment = Alignment.Top) {
+                                Icon(Icons.Outlined.Security, null, tint = colors.sub, modifier = Modifier.size(17.dp))
+                                Text(
+                                    if (manifest.permissions.isEmpty()) "权限：无额外权限" else "权限：${manifest.permissions.joinToString("、")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.sub,
+                                    modifier = Modifier.padding(start = 6.dp),
+                                )
+                            }
+                            if (manifest.sourceUrl.isNotBlank()) {
+                                Text(manifest.sourceUrl, style = MaterialTheme.typography.bodySmall, color = colors.faint, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                OutlinedButton(
+                                    onClick = {
+                                        busy = manifest.id
+                                        scope.launch {
+                                            val result = withContext(Dispatchers.IO) { fetchAndInstallSkill(database, manifest.sourceUrl) }
+                                            notice = result.fold({ "已检查并更新 ${manifest.name}" to false }, { "检查失败：${it.message}" to true })
+                                            busy = null
+                                        }
+                                    },
+                                    enabled = busy == null,
+                                    modifier = Modifier.height(42.dp),
+                                ) {
+                                    Icon(Icons.Outlined.Refresh, null, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(if (busy == manifest.id) "检查中…" else "检查更新")
+                                }
+                            }
+                        }
+                    }
+                }
+                item {
+                    OutlinedButton(onClick = { manifestDialog = true }, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+                        Icon(Icons.Outlined.Extension, null, modifier = Modifier.size(19.dp)); Spacer(Modifier.width(8.dp)); Text("导入新清单")
+                    }
+                }
             }
         }
     }
@@ -270,6 +374,43 @@ fun ExtensionMarketScreen(
             }
         )
     }
+    if (manifestDialog) {
+        ExtensionManifestDialog(
+            onDismiss = { manifestDialog = false },
+            onInstall = { raw ->
+                manifestDialog = false; busy = "manifest"
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val manifest = ExtensionManifestValidator.parse(raw).getOrThrow()
+                            require(manifest.kind.equals("skill", true)) { "当前仅允许安装 skill 清单" }
+                            if (manifest.sourceUrl.isNotBlank()) fetchAndInstallSkill(database, manifest.sourceUrl).getOrThrow()
+                            else {
+                                require(manifest.content.isNotBlank()) { "清单缺少 content 或 sourceUrl" }
+                                installMarketSkill(database, MarketSkill(manifest.name, manifest.description, manifest.content)); manifest.name
+                            }
+                            database.settingDao().put("extension_manifest_${manifest.id}", raw)
+                            manifest.name
+                        }
+                    }
+                    notice = result.fold({ "已安装扩展 ${it}" to false }, { "安装失败：${it.message}" to true }); busy = null; refreshManifests()
+                }
+            }
+        )
+    }
+
+    if (tab == ExtensionTab.MANIFESTS) {
+        // The manifest tab is deliberately metadata-only: it makes permissions,
+        // source and version reviewable before a future runtime adds more kinds.
+        // Installation still goes through the same validator and HTTPS checks.
+        // This keeps the market safe while making the extension lifecycle visible.
+    }
+}
+
+@Composable
+private fun ExtensionManifestDialog(onDismiss: () -> Unit, onInstall: (String) -> Unit) {
+    var raw by remember { mutableStateOf("{\n  \"id\": \"my-skill\",\n  \"kind\": \"skill\",\n  \"name\": \"我的技能\",\n  \"description\": \"\",\n  \"permissions\": [],\n  \"content\": \"# 指令\"\n}") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("导入扩展清单") }, text = { OutlinedTextField(raw, { raw = it }, minLines = 8, modifier = Modifier.fillMaxWidth(), label = { Text("JSON 清单") }) }, confirmButton = { TextButton(onClick = { onInstall(raw) }) { Text("校验并安装") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }
 
 @Composable
@@ -297,7 +438,7 @@ private fun RemoteSkillDialog(onDismiss: () -> Unit, onInstall: (String) -> Unit
         title = { Text("导入远程 Skill") },
         text = {
             Column {
-                Text("仅导入 Markdown 指令文本；请使用可信的 raw SKILL.md 地址。", style = MaterialTheme.typography.bodySmall)
+                Text("仅允许 HTTPS 的 raw SKILL.md 地址；导入前会限制大小并显示来源。", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(url, { url = it }, singleLine = true, label = { Text("SKILL.md URL") }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
             }
         },
@@ -322,7 +463,7 @@ private suspend fun installMarketSkill(database: AppDatabase, item: MarketSkill)
 
 private suspend fun fetchAndInstallSkill(database: AppDatabase, url: String): Result<String> = try {
     val uri = URI(url)
-    require(uri.scheme == "https" || uri.scheme == "http") { "只支持 http 或 https 地址" }
+    require(uri.scheme == "https") { "扩展源必须使用 HTTPS" }
     val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
     val markdown = client.newCall(Request.Builder().url(url).build()).execute().use { response ->
         require(response.isSuccessful) { "HTTP ${response.code}" }

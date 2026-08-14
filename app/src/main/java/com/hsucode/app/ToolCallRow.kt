@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
@@ -35,8 +36,11 @@ import com.hsucode.app.R
 private val JetBrainsMono = FontFamily(Font(R.font.jetbrains_mono, FontWeight.Normal))
 
 private fun toolIcon(toolName: String): ImageVector = when (toolName) {
-    "shell_exec", "su_exec" -> Icons.Outlined.Build
+    "shell_exec", "su_exec", "shizuku_exec", "shizuku_system", "shizuku_process_start", "shizuku_process_status", "shizuku_process_stop" -> Icons.Outlined.Build
+    "shizuku_file" -> Icons.Outlined.Folder
+    "shizuku_ui" -> Icons.Outlined.TouchApp
     "file_read" -> Icons.Outlined.Description
+    "document_create", "document_extract", "document_convert" -> Icons.Outlined.Description
     "file_edit" -> Icons.Outlined.Edit
     "web_search" -> Icons.Outlined.Search
     "web_fetch" -> Icons.Outlined.Public
@@ -190,9 +194,10 @@ fun ToolCallRow(toolCall: MessageContent.ToolCall, modifier: Modifier = Modifier
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("❯ ", fontSize = 11.sp, fontFamily = JetBrainsMono, color = Green)
-                    Text(toolCall.paramsSummary, fontSize = 11.sp, fontFamily = JetBrainsMono, color = Ink,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    SelectionContainer(Modifier.weight(1f)) {
+                        Text(toolCall.paramsSummary, fontSize = 11.sp, fontFamily = JetBrainsMono, color = Ink,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     Spacer(Modifier.width(8.dp))
                     Icon(
                         Icons.Outlined.ContentCopy,
@@ -214,10 +219,12 @@ fun ToolCallRow(toolCall: MessageContent.ToolCall, modifier: Modifier = Modifier
                         modifier = Modifier.fillMaxWidth().padding(12.dp),
                         verticalAlignment = Alignment.Top
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            toolCall.stdout.lines().forEach { line ->
-                                Text(line, fontSize = 10.sp, fontFamily = JetBrainsMono, color = Sub,
-                                    lineHeight = 14.sp)
+                        SelectionContainer(Modifier.weight(1f)) {
+                            Column {
+                                toolCall.stdout.lines().forEach { line ->
+                                    Text(line, fontSize = 10.sp, fontFamily = JetBrainsMono, color = Sub,
+                                        lineHeight = 14.sp)
+                                }
                             }
                         }
                         Spacer(Modifier.width(8.dp))
@@ -242,10 +249,12 @@ fun ToolCallRow(toolCall: MessageContent.ToolCall, modifier: Modifier = Modifier
                         modifier = Modifier.fillMaxWidth().padding(12.dp),
                         verticalAlignment = Alignment.Top
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            toolCall.stderr.lines().forEach { line ->
-                                Text(line, fontSize = 10.sp, fontFamily = JetBrainsMono, color = Red,
-                                    lineHeight = 14.sp)
+                        SelectionContainer(Modifier.weight(1f)) {
+                            Column {
+                                toolCall.stderr.lines().forEach { line ->
+                                    Text(line, fontSize = 10.sp, fontFamily = JetBrainsMono, color = Red,
+                                        lineHeight = 14.sp)
+                                }
                             }
                         }
                         Spacer(Modifier.width(8.dp))

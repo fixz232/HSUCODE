@@ -29,7 +29,7 @@ class TerminalState {
     private val maxLines = 4000
     private val commandMutex = Mutex()
     private var interactiveBackend: WorkspaceRuntime.Backend? = null
-    private var interactiveSession: InteractiveShellSession? = null
+    private var interactiveSession: CommandSession? = null
 
     @Synchronized
     fun appendChunk(s: String) {
@@ -120,7 +120,7 @@ class TerminalState {
         interactiveBackend = null
     }
 
-    private fun ensureInteractiveSession(backend: WorkspaceRuntime.Backend): InteractiveShellSession {
+    private fun ensureInteractiveSession(backend: WorkspaceRuntime.Backend): CommandSession {
         val current = interactiveSession
         if (current != null && interactiveBackend == backend && current.isAlive()) return current
         current?.close()

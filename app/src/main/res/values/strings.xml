@@ -4,4 +4,5 @@
     <string name="widget_title">HSUCODE</string>
     <string name="widget_default_status">空闲</string>
     <string name="widget_description">HSUCODE Agent 状态小组件</string>
+    <string name="hsucode_accessibility_description">在你手动启用并确认操作后，HSUCODE 可读取当前窗口结构并执行点击或输入。</string>
 </resources>

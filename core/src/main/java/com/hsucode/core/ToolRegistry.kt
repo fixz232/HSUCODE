@@ -3,6 +3,7 @@ package com.hsucode.core
 import com.hsucode.provider.ToolCall
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Registry of available tools. The AgentCore queries this to build the tools[] array
@@ -11,10 +12,10 @@ import org.json.JSONObject
  * Adding a new tool = register(Tool) + its schema is auto-generated — no loop changes.
  */
 class ToolRegistry {
-    private val tools = mutableMapOf<String, Tool>()
+    private val tools = ConcurrentHashMap<String, Tool>()
 
     // Hermes-③ check_fn TTL 缓存:避免每次 buildToolsJson 都真跑 isAvailable()(可能读设置/探网)。
-    private val availabilityCache = mutableMapOf<String, Pair<Long, Boolean>>()
+    private val availabilityCache = ConcurrentHashMap<String, Pair<Long, Boolean>>()
     private val availabilityTtlMs = 30_000L
 
     /**
@@ -85,10 +86,10 @@ class ToolRegistry {
         if (tools.containsKey(name)) return name
         val flat = flatten(name)
         if (flat.isEmpty()) return name
-        tools.keys.filter { flatten(it) == flat }.singleOrNull()?.let { return it }
+        tools.keys.toList().filter { flatten(it) == flat }.singleOrNull()?.let { return it }
         val tokens = tokenize(name)
         if (tokens.isEmpty()) return name
-        tools.keys.filter { tokenize(it) == tokens }.singleOrNull()?.let { return it }
+        tools.keys.toList().filter { tokenize(it) == tokens }.singleOrNull()?.let { return it }
         return name
     }
 
@@ -113,7 +114,7 @@ class ToolRegistry {
     private fun suggest(name: String): List<String> {
         val tokens = tokenize(name)
         if (tokens.isEmpty()) return emptyList()
-        return tools.keys
+        return tools.keys.toList()
             .map { it to tokenize(it).count { t -> t in tokens } }
             .filter { it.second > 0 }
             .sortedByDescending { it.second }
@@ -135,7 +136,8 @@ class ToolRegistry {
         val arr = JSONArray()
         // DeepSeek 缓存优化:工具**按名字典序**排序,保证 tools 数组逐字节稳定,
         // 不受注册/HashMap 迭代顺序影响——前缀稳定才能命中 DeepSeek 自动前缀缓存。
-        for (tool in tools.values.sortedBy { it.name }) {
+        // Snapshot first: MCP servers can register/unregister from a background coroutine.
+        for (tool in tools.values.toList().sortedBy { it.name }) {
             // 协作模式:白名单非空时,只放行编排类工具,其余「动手」工具对主脑隐藏(强制派活)。
             if (collabAllowlist.isNotEmpty() && tool.name !in collabAllowlist) continue
             // 身份卡白名单:与上面那道是「都要满足」的关系,不是二选一。
@@ -168,7 +170,7 @@ class ToolRegistry {
                     append("未知工具: ${call.name}")
                     val near = suggest(call.name)
                     if (near.isNotEmpty()) append("。你要找的可能是: ${near.joinToString(" / ")}")
-                    append("（全部可用: ${tools.keys.sorted().joinToString()}）")
+                    append("（全部可用: ${tools.keys.toList().sorted().joinToString()}）")
                 }
             )
 

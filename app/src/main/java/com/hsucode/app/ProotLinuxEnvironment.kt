@@ -103,22 +103,27 @@ object ProotLinuxEnvironment {
     /** Installs or refreshes Ubuntu without deleting a working rootfs until staging succeeds. */
     suspend fun bootstrap(force: Boolean = false): Boolean = withContext(Dispatchers.IO) {
         if (!installing.compareAndSet(false, true)) return@withContext false
-        val root = installRoot ?: return@withContext false
-        val source = activeSource
-        if (source == null || !hasNativeLauncher()) {
-            state = State.UNSUPPORTED
-            return@withContext false
-        }
-
-        state = State.SETTING_UP
-        setupLog = ""
-        cancelRequested.set(false)
-        val rootfs = rootfsDir() ?: return@withContext false
-        val temp = File(root, "tmp").apply { mkdirs() }
-        val archive = File(temp, source.fileName)
-        val staging = File(root, "rootfs-installing")
-        val backup = File(root, "rootfs-previous")
         try {
+            val root = installRoot ?: return@withContext false
+            val source = activeSource
+            if (source == null || !hasNativeLauncher()) {
+                state = State.UNSUPPORTED
+                return@withContext false
+            }
+
+            state = State.SETTING_UP
+            setupLog = ""
+            cancelRequested.set(false)
+            val rootfs = rootfsDir() ?: run {
+                state = State.ERROR
+                log("部署失败：无法创建 Ubuntu 文件系统目录")
+                return@withContext false
+            }
+            val temp = File(root, "tmp").apply { mkdirs() }
+            val archive = File(temp, source.fileName)
+            val staging = File(root, "rootfs-installing")
+            val backup = File(root, "rootfs-previous")
+            try {
             if (!force && hasUsableRootfs()) {
                 log("检测到已安装的免 Root Ubuntu，跳过重复部署。")
                 state = State.READY
@@ -152,6 +157,9 @@ object ProotLinuxEnvironment {
             archive.delete()
             staging.deleteRecursively()
             if (backup.exists() && hasUsableRootfs()) backup.deleteRecursively()
+            }
+        } finally {
+            // Every return above, including unsupported/missing-rootfs paths, must release this lock.
             installing.set(false)
         }
     }

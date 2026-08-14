@@ -19,6 +19,7 @@ class WebFetchTool : Tool {
     companion object {
         private const val TAG = "WebFetchTool"
         private const val MAX_OUTPUT = 8000
+        private const val MAX_RESPONSE_BYTES = 2L * 1024 * 1024
         private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     }
 
@@ -45,23 +46,18 @@ class WebFetchTool : Tool {
         val url = params["url"] ?: return@withContext ToolResult.Error("缺少 url 参数")
 
         try {
-            val client = okhttp3.OkHttpClient.Builder()
+            val client = NetworkUrlPolicy.secureClient(okhttp3.OkHttpClient.Builder()
                 .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .followRedirects(true)
                 .cache(HttpCacheProvider.get())
-                .build()
+            ).build()
 
-            val request = okhttp3.Request.Builder()
-                .url(url)
-                .header("User-Agent", USER_AGENT)
-                .build()
-
-            val response = client.newCall(request).execute()
-            val html = response.body?.string() ?: ""
-
-            if (!response.isSuccessful) {
-                return@withContext ToolResult.Error("HTTP ${response.code}: 无法访问 $url")
+            val html = NetworkUrlPolicy.executeGet(client, url, mapOf("User-Agent" to USER_AGENT)).use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext ToolResult.Error("HTTP ${response.code}: 无法访问 $url")
+                }
+                val body = response.body ?: return@withContext ToolResult.Error("响应没有内容")
+                NetworkUrlPolicy.readTextLimited(body, MAX_RESPONSE_BYTES)
             }
 
             // Parse with Jsoup

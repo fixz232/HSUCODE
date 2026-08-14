@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -58,6 +59,21 @@ fun WorkflowScreen(
             onStop = { agentCore.stop() },
             onReplay = onNavigateToReplay
         )
+
+        if (events.isEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(WfPalette.gray.copy(alpha = 0.08f)).padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Outlined.AccountTree, null, tint = WfPalette.green)
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text("线性工作流", color = WfPalette.black, fontSize = 14.sp)
+                    Text("开始对话任务后，这里会按顺序记录思考、工具执行、权限等待、结果和失败原因。", color = WfPalette.gray, fontSize = 12.sp)
+                }
+            }
+        }
 
         // --- Timeline ---
         LazyColumn(

@@ -6,12 +6,17 @@
  */
 package com.hsucode.app
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -64,9 +69,22 @@ class MainActivity : ComponentActivity() {
         ttsHelper = TtsHelper(this)
         ttsHelper.initialize()
 
+        // Android 9 and below require the legacy runtime permission for the public
+        // Downloads fallback. Android 10+ uses MediaStore and never prompts here.
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                401
+            )
+        }
+
         setContent {
             HsuTheme(dark = app.darkMode) {
-            var currentPage by remember { mutableStateOf("chat") }
+            var currentPage by remember { mutableStateOf("task_workbench") }
             // 终端页可从「对话页顶栏」或「环境配置页」进入;记录来源,退出时精确回到来处(修返回逻辑 bug)。
             var terminalOrigin by remember { mutableStateOf("chat") }
             var workspaceOrigin by remember { mutableStateOf("settings") }
@@ -211,6 +229,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onNavigateToSettings = { currentPage = "settings" },
+                        onNavigateToWork = { currentPage = "task_workbench" },
                         onClose = { drawerScope.launch { drawerState.close() } },
                         onCreateProject = { name -> app.createProject(name) },
                         onCreateNewInProject = { projectId ->
@@ -289,6 +308,7 @@ class MainActivity : ComponentActivity() {
                             currentModel = app.currentModelLabel,
                             supplierId = active?.supplierId.orEmpty(),
                             providerName = active?.name.orEmpty(),
+                            workspaceRoot = app.agentChatState.sessionWorkspaceRoot,
                             availableModels = names,
                             isGoalSession = curIsGoal,
                             goalStatusCode = curGoal?.goalStatus ?: "",
@@ -364,6 +384,15 @@ class MainActivity : ComponentActivity() {
                         onNavigateToDeveloperWorkbench = { currentPage = "developer_workbench" },
                         onNavigateToBackup = { currentPage = "backup_restore" },
                         onNavigateToTaskRecovery = { currentPage = "task_recovery" },
+                        onNavigateToTaskCenter = { currentPage = "task_center" },
+                        onNavigateToPermissionRules = { currentPage = "permission_rules" },
+                        onNavigateToRoleCards = { currentPage = "role_cards" },
+                        onNavigateToMemoryRelations = { currentPage = "memory_relations" },
+                        onNavigateToAccessibility = { currentPage = "accessibility" },
+                        shizukuEnabled = app.shizukuEnabled,
+                        shizukuStatus = ShizukuManager.state.collectAsState().value.label,
+                        onUpdateShizuku = { app.updateShizukuEnabled(it) },
+                        onNavigateToShizuku = { currentPage = "shizuku" },
                         onNavigateToHealth = { currentPage = "configuration_health" },
                         onNavigateToAbout = { currentPage = "about" },
                         darkMode = app.darkMode,
@@ -478,6 +507,19 @@ class MainActivity : ComponentActivity() {
                         database = app.database,
                         onBack = { currentPage = "settings" }
                     )
+                    "task_workbench" -> TaskWorkbenchHomeScreen(
+                        runtime = app.taskRuntime,
+                        workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
+                        onOpenChat = { currentPage = "chat" },
+                        onOpenTasks = { currentPage = "task_center" },
+                        onOpenWorkbench = { currentPage = "developer_workbench" },
+                        onOpenAutomation = { currentPage = "accessibility" },
+                        onOpenWorkflow = { currentPage = "workflow" },
+                        onOpenRoles = { currentPage = "role_cards" },
+                        onOpenExtensions = { currentPage = "extension_market" },
+                        onOpenSettings = { currentPage = "settings" },
+                        onOpenDrawer = { drawerScope.launch { drawerState.open() } },
+                    )
                     "lan_devices" -> LanDiscoveryScreen(onBack = { currentPage = "settings" })
                     "logs" -> LogViewerScreen(onBack = { currentPage = "settings" })
                     "code_index" -> CodeIndexScreen(database = app.database, onBack = { currentPage = "settings" })
@@ -509,9 +551,21 @@ class MainActivity : ComponentActivity() {
                     "about" -> AboutScreen(app = app, onBack = { currentPage = "settings" })
                     "backup_restore" -> BackupRestoreScreen(app = app, onBack = { currentPage = "settings" })
                     "task_recovery" -> TaskRecoveryScreen(app = app, onBack = { currentPage = "settings" })
+                    "task_center" -> TaskCenterScreen(runtime = app.taskRuntime, onBack = { currentPage = "task_workbench" })
+                    "permission_rules" -> PermissionRulesScreen(database = app.database, onBack = { currentPage = "settings" }, onChanged = { app.reloadPermissionRules() })
+                    "role_cards" -> RoleCardScreen(database = app.database, onBack = { currentPage = "task_workbench" })
+                    "memory_relations" -> MemoryRelationsScreen(database = app.database, onBack = { currentPage = "settings" })
+                    "accessibility" -> AccessibilityAutomationScreen(onBack = { currentPage = "task_workbench" })
+                    "shizuku" -> ShizukuScreen(
+                        enabled = app.shizukuEnabled,
+                        terminalEnabled = app.shizukuTerminalEnabled,
+                        onEnabledChange = { app.updateShizukuEnabled(it) },
+                        onTerminalEnabledChange = { app.updateShizukuTerminalEnabled(it) },
+                        onBack = { currentPage = "task_workbench" }
+                    )
                     "configuration_health" -> ConfigurationHealthScreen(
                         app = app,
-                        onBack = { currentPage = "settings" },
+                        onBack = { currentPage = "task_workbench" },
                         onProvider = { currentPage = "supplier" },
                         onWorkspace = { currentPage = "settings" },
                         onEnvironment = { workspaceOrigin = "settings"; currentPage = "env_config" },
@@ -527,7 +581,8 @@ class MainActivity : ComponentActivity() {
                     )
                     "developer_workbench" -> DeveloperWorkbenchScreen(
                         workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
-                        onBack = { currentPage = "settings" },
+                        runtime = app.taskRuntime,
+                        onBack = { currentPage = "task_workbench" },
                         onFiles = { currentPage = "workspace_files" },
                         onDocuments = { currentPage = "document_workbench" },
                         onNetwork = { currentPage = "network_tools" },
@@ -535,7 +590,12 @@ class MainActivity : ComponentActivity() {
                         onPrompts = { currentPage = "prompt_library" },
                         onTerminal = { terminalOrigin = "developer_workbench"; currentPage = "terminal" },
                         onEnvironment = { workspaceOrigin = "developer_workbench"; currentPage = "env_config" },
-                        onGit = { currentPage = "git_config" }
+                        onGit = { currentPage = "git_config" },
+                        onReview = { currentPage = "workspace_review" },
+                        onBrowser = { currentPage = "browser_agent" },
+                        onAutomation = { currentPage = "accessibility" },
+                        onWorkflow = { currentPage = "workflow" },
+                        onRoles = { currentPage = "role_cards" },
                     )
                     "workspace_files" -> WorkspaceFilesScreen(
                         workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
@@ -550,6 +610,8 @@ class MainActivity : ComponentActivity() {
                         workspaceRoot = app.agentChatState.sessionWorkspaceRoot.ifBlank { app.workspaceRootGlobal },
                         onBack = { currentPage = "developer_workbench" }
                     )
+                    "workspace_review" -> WorkspaceReviewScreen(onBack = { currentPage = "developer_workbench" })
+                    "browser_agent" -> BrowserAgentScreen(onBack = { currentPage = "developer_workbench" })
                     "extension_market" -> ExtensionMarketScreen(
                         database = app.database,
                         mcpManager = app.mcpManager,
@@ -643,12 +705,14 @@ class MainActivity : ComponentActivity() {
 /** 各子页返回时的「上一页」映射:设置类子页回设置,其余回聊天。 */
 private fun parentPageOf(page: String): String = when (page) {
     "settings" -> "chat"
+    "task_workbench" -> "chat"
     "supplier", "model_market", "git_config", "audit", "memory_storage", "skills", "mcp", "curated_memory",
     "cron_jobs", "aux_models", "function_models", "sub_agents", "env_config", "context_compress", "about",
     "lan_devices", "logs", "usage_stats", "kanban", "group_rooms", "profiles", "code_index", "developer_workbench" -> "settings"
     "workspace_files", "document_workbench", "network_tools", "extension_market", "prompt_library" -> "developer_workbench"
     "replay" -> "workflow"
     "identity_edit" -> "identity_list"
+    "shizuku" -> "settings"
     "identity_list" -> "settings"
     "workflow", "goal", "agent_scene" -> "chat"
     else -> "chat"

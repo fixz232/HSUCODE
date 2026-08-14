@@ -2,7 +2,7 @@
 
 **纯 Kotlin 原生 Android AI 智能体。** 一个运行在手机上的自主 AI Agent:多供应商接入、工具调用循环、子智能体并行协作、长期记忆、内置 root/Ubuntu 环境与终端,以及像素风「智能体指挥室」实时动画。原生 Android 工程,无跨端框架。
 
-> 版本:**1.14**(versionCode 114) · 许可:**GPL-3.0-or-later**（第三方组件按各自许可证）
+> 版本:**1.17**(versionCode 117) · 许可:**GPL-3.0-or-later**（第三方组件按各自许可证）
 
 源码仓库：[fixz232/HSUCODE](https://github.com/fixz232/HSUCODE) · 默认分支：`main`
 
@@ -19,6 +19,19 @@ AGPL/LGPL 改编部分的对应源码、资源许可证和构建说明随 `main`
 - 修改记录与时间:见 [`MODIFICATIONS.md`](MODIFICATIONS.md)。
 - 原始版权、许可证和作者声明均予以保留；不得删除 [`LICENSE`](LICENSE)、第三方许可证或源码中的既有归属声明。
 - 当前修改包含加密全量备份与跨设备恢复、恢复流程集成、智能体任务状态恢复、智能体指挥室的运行控制与权限审批，以及统一模型中心和智能路由。
+
+---
+
+## ⚠️ 使用、安全与隐私边界
+
+HSUCODE 是本地运行的开发者工具，不是托管 AI 服务，也不提供任何模型、密钥、云端文件存储或安全保证。使用前请了解以下边界：
+
+- 你配置的模型供应商、联网搜索站点、Git/MCP 服务和 Ubuntu rootfs 下载源会按对应功能接收请求数据；它们的隐私和服务条款由各自运营方决定。
+- 文件、终端、浏览器自动化、Shizuku、Root 与无障碍能力均可能影响设备或工作区内容。它们默认按功能和系统授权分层启用，执行前仍应核对目标路径、命令、权限范围和模型输出。
+- API Key、对话、工作区内容和备份可能包含敏感数据。不要把不应发送给已配置供应商或外部工具的数据交给智能体处理。
+- HSUCODE、上游项目及模型/供应商商标之间不存在官方隶属、认证、赞助或背书关系。
+
+完整的数据处理说明见 [`PRIVACY.md`](PRIVACY.md)，安全边界与漏洞反馈方式见 [`SECURITY.md`](SECURITY.md)。
 
 ---
 
@@ -101,8 +114,11 @@ cd HSUCODE
 | `RECORD_AUDIO` | 语音转写(仅在你主动使用语音输入时) |
 | `POST_NOTIFICATIONS` | 后台任务完成通知 |
 | `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_DATA_SYNC` | 后台推进长任务(Goal/Work、定时任务) |
+| `SYSTEM_ALERT_WINDOW` | 用户主动启用 UI 自动化时显示运行控制悬浮层 |
+| `ACCESS_WIFI_STATE` / `CHANGE_WIFI_MULTICAST_STATE` | 用户进入局域网设备发现时读取网络状态和接收局域网广播 |
+| 无障碍服务 | 仅在系统设置中由用户明确开启后，用于 UI 自动化；默认关闭 |
 
-应用不含广告与第三方追踪。API Key 等敏感配置仅保存在本机;`android:allowBackup="false"` 已关闭系统自动备份。
+应用源码不包含广告或行为分析 SDK。API Key 等敏感配置仅保存在本机;`android:allowBackup="false"` 已关闭系统自动备份。外部模型与网络服务仍会按你主动启用的功能接收请求数据，详见 [`PRIVACY.md`](PRIVACY.md)。
 
 ---
 
